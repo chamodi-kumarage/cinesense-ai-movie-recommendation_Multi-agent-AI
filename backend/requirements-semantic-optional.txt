@@ -1,0 +1,6 @@
+# OPTIONAL local sentence-transformer semantic retrieval.
+# Recommended with Python 3.11 or 3.12.
+# The main system does NOT require this file to run.
+numpy>=2.0,<3
+scikit-learn>=1.7,<2
+sentence-transformers>=5,<6

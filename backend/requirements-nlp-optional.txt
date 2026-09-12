@@ -1,0 +1,3 @@
+# Optional richer local NER. Install on a supported Python version, then:
+# python -m spacy download en_core_web_sm
+spacy>=3.8,<4

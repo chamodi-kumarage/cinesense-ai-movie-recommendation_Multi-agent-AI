@@ -1,0 +1,2 @@
+# CineSense AI Subscription Terms (Project Draft)
+Premium and Family subscriptions renew monthly until cancelled. Paid features remain available while the subscription is active. Pricing shown in the application is the project launch proposal and can be updated before a production launch. Users are responsible for maintaining accurate payment information. Failed payments may place a subscription in a past-due state and can suspend paid features after the provider's retry process.

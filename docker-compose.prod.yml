@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cinesense
+      POSTGRES_USER: cinesense
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - cinesense_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinesense -d cinesense"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: {context: ., dockerfile: Dockerfile.backend}
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://cinesense:${POSTGRES_PASSWORD}@db:5432/cinesense
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      LLM_PROVIDER: ${LLM_PROVIDER:-offline}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      B2B_API_KEY: ${B2B_API_KEY}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PREMIUM_PRICE_ID: ${STRIPE_PREMIUM_PRICE_ID:-}
+      STRIPE_FAMILY_PRICE_ID: ${STRIPE_FAMILY_PRICE_ID:-}
+    depends_on:
+      db: {condition: service_healthy}
+    expose: ["8000"]
+
+  frontend:
+    build: {context: ., dockerfile: Dockerfile.frontend}
+    restart: unless-stopped
+    depends_on: [backend]
+    expose: ["80"]
+
+volumes:
+  cinesense_pg:
