@@ -16,6 +16,35 @@ class User(Base):
     plan: Mapped[str] = mapped_column(String(30), default="free")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+class FamilyGroup(Base):
+    __tablename__ = "family_groups"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    plan: Mapped[str] = mapped_column(String(30), default="family")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class FamilyMember(Base):
+    __tablename__ = "family_members"
+    __table_args__ = (UniqueConstraint("family_group_id", "user_id", name="uq_family_member_group_user"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    family_group_id: Mapped[int] = mapped_column(ForeignKey("family_groups.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class FamilyInvite(Base):
+    __tablename__ = "family_invites"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    family_group_id: Mapped[int] = mapped_column(ForeignKey("family_groups.id"), index=True)
+    invited_email: Mapped[str] = mapped_column(String(255), index=True)
+    invited_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
 class Movie(Base):
     __tablename__ = "movies"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

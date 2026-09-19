@@ -1,5 +1,6 @@
-import json, uuid
+import hashlib, json, secrets, uuid
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -7,11 +8,12 @@ from ..db import get_db
 from ..dependencies import get_current_user
 from ..models import (
     Profile, ActiveProfile, ProfileWatchEvent, ProfilePreference, Movie,
-    GroupSession, GroupVote, PlannerActivity,
+    GroupSession, GroupVote, PlannerActivity, User, FamilyGroup, FamilyMember, FamilyInvite,
 )
 from ..schemas import (
     ProfileCreateRequest, ProfileUpdateRequest, ProfileSwitchRequest,
-    GroupChoiceRequest, GroupCompareRequest, GroupVoteRequest,
+    GroupChoiceRequest, GroupCompareRequest, GroupVoteRequest, FamilyInviteCreateRequest,
+    FamilyInviteAcceptRequest, FamilyMemberRoleRequest,
 )
 from ..security import encrypt_text, decrypt_text
 from ..services.profiles import ensure_default_profile, active_profile_id
@@ -24,10 +26,144 @@ from ..protocol import AgentEnvelope
 
 router = APIRouter(prefix="/api/family", tags=["family"])
 
+MAX_FAMILY_PEOPLE = 5
 
-def require_family(user):
-    if user.plan != "family":
+def now_utc():
+    return datetime.now(timezone.utc)
+
+def active_membership(db: Session, user_id: int):
+    return db.query(FamilyMember).filter(FamilyMember.user_id == user_id, FamilyMember.status == "active").first()
+
+def owner_group(db: Session, user, create: bool = False):
+    group = db.query(FamilyGroup).filter(FamilyGroup.owner_user_id == user.id).first()
+    if not group and create:
+        if user.plan != "family":
+            raise HTTPException(403, "A Family subscription is required to create a household.")
+        group = FamilyGroup(owner_user_id=user.id, plan="family")
+        db.add(group); db.flush()
+        db.add(FamilyMember(family_group_id=group.id, user_id=user.id, role="owner", status="active"))
+        db.commit(); db.refresh(group)
+    return group
+
+def family_access(db: Session, user):
+    membership = active_membership(db, user.id)
+    if membership:
+        return db.get(FamilyGroup, membership.family_group_id), membership
+    if user.plan == "family":
+        group = owner_group(db, user, create=True)
+        return group, active_membership(db, user.id)
+    raise HTTPException(403, "Family profiles and group choice require an active Family household membership.")
+
+def require_owner(db: Session, user):
+    group, membership = family_access(db, user)
+    if not membership or membership.role != "owner" or group.owner_user_id != user.id:
+        raise HTTPException(403, "Only the Family plan owner can manage household members.")
+    return group
+
+def member_payload(db: Session, member: FamilyMember):
+    account = db.get(User, member.user_id)
+    profile = ensure_default_profile(db, account) if account else None
+    return {"id": member.id, "user_id": member.user_id, "email": account.email if account else "", "display_name": decrypt_text(account.display_name_enc) if account else "", "profile_id": profile.id if profile else None, "role": member.role, "status": member.status, "is_owner": member.role == "owner", "participant_type": "account", "created_at": member.created_at}
+
+def family_owner_id(db: Session, user) -> int:
+    group, _ = family_access(db, user)
+    return group.owner_user_id
+
+def allowed_family_profiles(db: Session, user) -> list[Profile]:
+    group, _ = family_access(db, user)
+    members = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").all()
+    account_profile_ids = []
+    for member in members:
+        account = db.get(User, member.user_id)
+        if account:
+            account_profile_ids.append(ensure_default_profile(db, account).id)
+    managed = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or [-1])).all()
+    account_profiles = db.query(Profile).filter(Profile.id.in_(account_profile_ids or [-1])).all()
+    return account_profiles + managed
+
+
+def require_family(user, db: Session | None = None):
+    if user.plan != "family" and (db is None or not active_membership(db, user.id)):
         raise HTTPException(403, "Family profiles and group choice require the Family plan.")
+
+@router.get("/household")
+def household(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group, membership = family_access(db, user)
+    members = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").order_by(FamilyMember.id).all()
+    pending = db.query(FamilyInvite).filter(FamilyInvite.family_group_id == group.id, FamilyInvite.status == "pending").order_by(FamilyInvite.created_at.desc()).all()
+    current = now_utc()
+    for invite in pending:
+        expires = invite.expires_at if invite.expires_at.tzinfo else invite.expires_at.replace(tzinfo=timezone.utc)
+        if expires <= current: invite.status = "expired"
+    db.commit()
+    member_rows = [member_payload(db, m) for m in members]
+    account_profile_ids = {m["profile_id"] for m in member_rows if m["profile_id"]}
+    managed_profiles = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or {-1})).order_by(Profile.id).all()
+    participants = [{"id": m["profile_id"], "name": m["display_name"] or m["email"].split("@")[0], "subtitle": m["email"], "participant_type": "account", "role": m["role"], "user_id": m["user_id"]} for m in member_rows if m["profile_id"]]
+    participants += [{"id": p.id, "name": decrypt_text(p.name_enc), "subtitle": "Managed child / guest profile", "participant_type": "managed_profile", "role": "profile", "user_id": p.user_id} for p in managed_profiles]
+    return {"group_id": group.id, "owner_user_id": group.owner_user_id, "current_role": membership.role, "can_manage": membership.role == "owner", "max_members": MAX_FAMILY_PEOPLE, "members": member_rows, "participants": participants, "pending_invites": [{"id": i.id, "email": i.invited_email, "status": i.status, "expires_at": i.expires_at, "created_at": i.created_at} for i in pending if i.status == "pending"]}
+
+@router.get("/members")
+def list_household_members(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    return household(db, user)
+
+@router.post("/invites")
+def create_family_invite(data: FamilyInviteCreateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group = require_owner(db, user)
+    email = str(data.email).strip().lower()
+    target = db.query(User).filter(User.email == email).first()
+    active_count = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").count()
+    pending_count = db.query(FamilyInvite).filter(FamilyInvite.family_group_id == group.id, FamilyInvite.status == "pending", FamilyInvite.expires_at > now_utc()).count()
+    if active_count + pending_count >= MAX_FAMILY_PEOPLE:
+        raise HTTPException(409, "Family plan supports a maximum of five people, including pending invitations.")
+    if target and active_membership(db, target.id):
+        raise HTTPException(409, "That user already belongs to a family household.")
+    existing = db.query(FamilyInvite).filter(FamilyInvite.family_group_id == group.id, FamilyInvite.invited_email == email, FamilyInvite.status == "pending").first()
+    if existing:
+        existing.status = "expired"
+    raw_token = secrets.token_urlsafe(32)
+    invite = FamilyInvite(family_group_id=group.id, invited_email=email, invited_by_user_id=user.id, role=data.role, token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), status="pending", expires_at=now_utc() + timedelta(days=7))
+    db.add(invite); db.commit(); db.refresh(invite)
+    return {"id": invite.id, "email": email, "role": data.role, "status": invite.status, "expires_at": invite.expires_at, "token": raw_token, "invite_path": f"/?family_invite={raw_token}", "message": "Invitation created. Share this demo link with the invited person."}
+
+@router.post("/invites/accept")
+def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+    invite = db.query(FamilyInvite).filter(FamilyInvite.token_hash == token_hash).first()
+    if not invite or invite.status != "pending":
+        raise HTTPException(400, "This family invitation is invalid or has already been used.")
+    expires = invite.expires_at if invite.expires_at.tzinfo else invite.expires_at.replace(tzinfo=timezone.utc)
+    if expires <= now_utc():
+        invite.status = "expired"; db.commit()
+        raise HTTPException(400, "This family invitation has expired.")
+    if invite.invited_email.casefold() != user.email.casefold():
+        raise HTTPException(403, f"Sign in as {invite.invited_email} to accept this invitation.")
+    if active_membership(db, user.id):
+        raise HTTPException(409, "You already belong to a family household.")
+    active_count = db.query(FamilyMember).filter(FamilyMember.family_group_id == invite.family_group_id, FamilyMember.status == "active").count()
+    if active_count >= MAX_FAMILY_PEOPLE:
+        raise HTTPException(409, "This family household is already full.")
+    db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role=invite.role, status="active"))
+    invite.status = "accepted"; db.commit()
+    return {"ok": True, "message": "You joined the CineSense family household.", "group_id": invite.family_group_id}
+
+@router.patch("/members/{member_id}/role")
+def update_member_role(member_id: int, data: FamilyMemberRoleRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group = require_owner(db, user)
+    member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.family_group_id == group.id, FamilyMember.status == "active").first()
+    if not member: raise HTTPException(404, "Family member not found.")
+    if member.role == "owner": raise HTTPException(409, "The owner role cannot be changed here.")
+    member.role = data.role; db.commit(); db.refresh(member)
+    return member_payload(db, member)
+
+@router.delete("/members/{member_id}")
+def remove_household_member(member_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group = require_owner(db, user)
+    member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.family_group_id == group.id, FamilyMember.status == "active").first()
+    if not member: raise HTTPException(404, "Family member not found.")
+    if member.role == "owner": raise HTTPException(409, "The Family owner cannot remove themselves.")
+    member.status = "removed"; db.commit()
+    return {"ok": True, "message": "Family member removed."}
 
 
 def owned_profile(db: Session, user_id: int, profile_id: int) -> Profile:
@@ -60,7 +196,8 @@ def validate_profile_ids(db: Session, user, profile_ids: list[int]) -> list[Prof
     ids = list(dict.fromkeys(profile_ids))
     if len(ids) < 2:
         raise HTTPException(400, "Choose at least two different family profiles.")
-    profiles = db.query(Profile).filter(Profile.user_id == user.id, Profile.id.in_(ids)).all()
+    allowed = {p.id: p for p in allowed_family_profiles(db, user)}
+    profiles = [allowed[i] for i in ids if i in allowed]
     if len(profiles) != len(ids):
         raise HTTPException(400, "One or more selected profiles do not belong to this Family account.")
     order = {pid: i for i, pid in enumerate(ids)}
@@ -68,7 +205,7 @@ def validate_profile_ids(db: Session, user, profile_ids: list[int]) -> list[Prof
 
 
 def session_or_404(db: Session, user, session_id: str) -> GroupSession:
-    row = db.query(GroupSession).filter(GroupSession.id == session_id, GroupSession.family_id == user.id).first()
+    row = db.query(GroupSession).filter(GroupSession.id == session_id, GroupSession.family_id == family_owner_id(db, user)).first()
     if not row:
         raise HTTPException(404, "Group movie session not found.")
     return row
@@ -84,7 +221,7 @@ def list_profiles(db: Session = Depends(get_db), user=Depends(get_current_user))
 
 @router.post("/profiles")
 def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_owner(db, user)
     ensure_default_profile(db, user)
     rows = db.query(Profile).filter(Profile.user_id == user.id).all()
     if len(rows) >= 5:
@@ -106,7 +243,7 @@ def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), us
 
 @router.put("/profiles/{profile_id}")
 def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_owner(db, user)
     profile = owned_profile(db, user.id, profile_id)
     if data.name is not None:
         normalized = data.name.strip().casefold()
@@ -126,7 +263,7 @@ def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = De
 
 @router.delete("/profiles/{profile_id}")
 def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_owner(db, user)
     rows = db.query(Profile).filter(Profile.user_id == user.id).order_by(Profile.id).all()
     if len(rows) <= 1:
         raise HTTPException(409, "At least one profile must remain.")
@@ -147,7 +284,7 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(
 
 @router.post("/profiles/switch")
 def switch_profile(data: ProfileSwitchRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     ensure_default_profile(db, user)
     profile = owned_profile(db, user.id, data.profile_id)
     active = db.query(ActiveProfile).filter(ActiveProfile.user_id == user.id).first()
@@ -161,7 +298,7 @@ def switch_profile(data: ProfileSwitchRequest, db: Session = Depends(get_db), us
 
 @router.get("/profiles/{profile_id}/preferences")
 def get_profile_preferences(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     owned_profile(db, user.id, profile_id)
     snapshot = profile_learning_snapshot(db, user.id, profile_id)
     return snapshot
@@ -169,7 +306,7 @@ def get_profile_preferences(profile_id: int, db: Session = Depends(get_db), user
 
 @router.get("/profiles/{profile_id}/history")
 def profile_history(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     owned_profile(db, user.id, profile_id)
     rows = (db.query(ProfileWatchEvent)
             .filter(ProfileWatchEvent.profile_id == profile_id, ProfileWatchEvent.user_id == user.id)
@@ -191,11 +328,11 @@ def profile_history(profile_id: int, db: Session = Depends(get_db), user=Depends
 
 @router.post("/groups")
 def create_group_session(data: GroupChoiceRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     profiles = validate_profile_ids(db, user, data.profile_ids)
     session_id = uuid.uuid4().hex
     row = GroupSession(
-        id=session_id, family_id=user.id,
+        id=session_id, family_id=family_owner_id(db, user),
         selected_profile_ids_json=json.dumps([p.id for p in profiles]),
         request_text=data.request_text.strip(), mood=(data.mood or ""), free_minutes=data.free_minutes,
         status="open",
@@ -214,7 +351,7 @@ def create_group_session(data: GroupChoiceRequest, db: Session = Depends(get_db)
 def run_group_recommendation(db: Session, user, row: GroupSession):
     profile_ids = json.loads(row.selected_profile_ids_json or "[]")
     profiles = validate_profile_ids(db, user, profile_ids)
-    snapshots = [(p, profile_learning_snapshot(db, user.id, p.id)) for p in profiles]
+    snapshots = [(p, profile_learning_snapshot(db, p.user_id, p.id)) for p in profiles]
 
     genre_counts, mood_counts, disliked_counts = Counter(), Counter(), Counter()
     for _, snap in snapshots:
@@ -261,7 +398,7 @@ def run_group_recommendation(db: Session, user, row: GroupSession):
 
 @router.post("/groups/{session_id}/recommend")
 def group_recommend(session_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     row = session_or_404(db, user, session_id)
     return run_group_recommendation(db, user, row)
 
@@ -276,10 +413,10 @@ def group_choice(data: GroupChoiceRequest, db: Session = Depends(get_db), user=D
 
 @router.get("/groups/{session_id}")
 def group_session_detail(session_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     row = session_or_404(db, user, session_id)
     ids = json.loads(row.selected_profile_ids_json or "[]")
-    profiles = db.query(Profile).filter(Profile.user_id == user.id, Profile.id.in_(ids)).all()
+    profiles = validate_profile_ids(db, user, ids)
     votes = db.query(GroupVote).filter(GroupVote.session_id == row.id).all()
     return {
         "session_id": row.id, "status": row.status, "request_text": row.request_text,
@@ -292,7 +429,7 @@ def group_session_detail(session_id: str, db: Session = Depends(get_db), user=De
 
 @router.post("/groups/{session_id}/compare")
 async def group_compare(session_id: str, data: GroupCompareRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     row = session_or_404(db, user, session_id)
     score_map = json.loads(row.candidate_scores_json or "{}")
     if any(str(mid) not in score_map for mid in data.movie_ids):
@@ -321,12 +458,17 @@ async def group_compare(session_id: str, data: GroupCompareRequest, db: Session 
 
 @router.post("/groups/{session_id}/vote")
 def group_vote(session_id: str, data: GroupVoteRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     row = session_or_404(db, user, session_id)
     profile_ids = json.loads(row.selected_profile_ids_json or "[]")
     if data.profile_id not in profile_ids:
         raise HTTPException(403, "Only profiles participating in this group session can vote.")
-    owned_profile(db, user.id, data.profile_id)
+    selected_profile = next((p for p in validate_profile_ids(db, user, profile_ids) if p.id == data.profile_id), None)
+    if not selected_profile:
+        raise HTTPException(403, "This participant is not available in your Family household.")
+    _, membership = family_access(db, user)
+    if membership.role != "owner" and selected_profile.user_id != user.id:
+        raise HTTPException(403, "Family members can vote only as their own account.")
     score_map = json.loads(row.candidate_scores_json or "{}")
     if str(data.movie_id) not in score_map:
         raise HTTPException(400, "Vote for a movie from this group's recommendation set.")
@@ -382,6 +524,6 @@ def final_selection_payload(db: Session, row: GroupSession) -> dict:
 
 @router.get("/groups/{session_id}/result")
 def group_result(session_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     row = session_or_404(db, user, session_id)
     return final_selection_payload(db, row)

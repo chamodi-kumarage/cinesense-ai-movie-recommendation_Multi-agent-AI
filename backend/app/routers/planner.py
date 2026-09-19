@@ -214,10 +214,12 @@ def calendar_status(
     user: User = Depends(get_current_user),
 ):
     row = db.query(CalendarConnection).filter(CalendarConnection.user_id == user.id).first()
+    google_available = bool(settings.google_client_id and settings.google_client_secret)
     return {
         "connected": bool(row and row.connected),
         "provider": row.provider if row and row.connected else None,
-        "google_available": bool(settings.google_client_id and settings.google_client_secret),
+        "google_available": google_available,
+        "google_redirect_uri": settings.google_redirect_uri if google_available else None,
     }
 
 
@@ -288,9 +290,8 @@ async def google_callback(
     code: str,
     state: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
 ):
-    row = db.query(CalendarConnection).filter(CalendarConnection.user_id == user.id).first()
+    row = db.query(CalendarConnection).filter(CalendarConnection.oauth_state == state).first()
     if not row or not row.oauth_state or not secrets.compare_digest(row.oauth_state, state):
         raise HTTPException(400, "Calendar connection state is invalid or expired.")
     async with httpx.AsyncClient(timeout=20) as client:

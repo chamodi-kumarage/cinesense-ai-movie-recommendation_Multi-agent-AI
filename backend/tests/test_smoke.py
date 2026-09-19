@@ -268,6 +268,62 @@ def test_family_profile_crud_preferences_consensus_compare_and_voting():
                 db.close()
 
 
+def test_family_owner_invite_accept_role_and_remove():
+    import uuid
+    from app.db import SessionLocal
+    from app.models import User, FamilyGroup, FamilyMember, FamilyInvite
+    invited_email = f"family-{uuid.uuid4().hex[:10]}@example.com"
+    old_plan = None
+    member_user_id = None
+    with TestClient(app) as owner_client:
+        assert owner_client.post('/api/auth/demo').status_code == 200
+        db = SessionLocal()
+        try:
+            owner = db.query(User).filter(User.email == 'demo@cinesense.ai').first()
+            old_plan = owner.plan
+            owner.plan = 'family'; db.commit()
+        finally:
+            db.close()
+        home = owner_client.get('/api/family/household')
+        assert home.status_code == 200 and home.json()['current_role'] == 'owner'
+        invite = owner_client.post('/api/family/invites', json={'email': invited_email, 'role': 'child'})
+        assert invite.status_code == 200, invite.text
+        token = invite.json()['token']
+
+        with TestClient(app) as member_client:
+            registered = member_client.post('/api/auth/register', json={'email': invited_email, 'password': 'Family123!', 'display_name': 'Invited Member'})
+            assert registered.status_code == 200, registered.text
+            accepted = member_client.post('/api/family/invites/accept', json={'token': token})
+            assert accepted.status_code == 200, accepted.text
+            member_home = member_client.get('/api/family/household')
+            assert member_home.status_code == 200 and member_home.json()['current_role'] == 'child'
+            assert member_client.post('/api/family/invites', json={'email': 'blocked@example.com'}).status_code == 403
+            assert member_client.post('/api/family/profiles', json={'name': 'Duplicate profile'}).status_code == 403
+
+        home = owner_client.get('/api/family/household').json()
+        joined = next(m for m in home['members'] if m['email'] == invited_email)
+        member_user_id = joined['user_id']
+        account_participants = [p['id'] for p in home['participants'] if p['participant_type'] == 'account']
+        combined = owner_client.post('/api/family/group-choice', json={'profile_ids': account_participants[:2], 'free_minutes': 180})
+        assert combined.status_code == 200, combined.text
+        assert len(combined.json()['members']) == 2
+        changed = owner_client.patch(f"/api/family/members/{joined['id']}/role", json={'role': 'member'})
+        assert changed.status_code == 200 and changed.json()['role'] == 'member'
+        assert owner_client.delete(f"/api/family/members/{joined['id']}").status_code == 200
+
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter(User.email == 'demo@cinesense.ai').first()
+        if owner and old_plan is not None: owner.plan = old_plan
+        if member_user_id:
+            db.query(FamilyMember).filter(FamilyMember.user_id == member_user_id).delete(synchronize_session=False)
+            db.query(User).filter(User.id == member_user_id).delete(synchronize_session=False)
+        db.query(FamilyInvite).filter(FamilyInvite.invited_email == invited_email).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
+
 def test_seeded_admin_dashboard_and_security_assessment():
     from app.config import get_settings
     settings=get_settings()
