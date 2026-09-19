@@ -144,6 +144,16 @@ class GroupVoteRequest(BaseModel):
     profile_id: int
     movie_id: int
 
+class FamilyInviteCreateRequest(BaseModel):
+    email: EmailStr
+    role: str = Field(default="member", pattern="^(member|child)$")
+
+class FamilyInviteAcceptRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=300)
+
+class FamilyMemberRoleRequest(BaseModel):
+    role: str = Field(pattern="^(member|child)$")
+
 class CheckoutRequest(BaseModel):
     plan: str = Field(pattern="^(premium|family)$")
 
