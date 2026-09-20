@@ -25,12 +25,16 @@ export const api={
   logout:()=>request('/api/auth/logout',{method:'POST'}),
   consent:()=>request('/api/auth/consent',{method:'POST',body:JSON.stringify({accepted:true})}),
   movies:()=>request('/api/movies'),
-  searchMovies:q=>request(`/api/catalogue/search?q=${encodeURIComponent(q)}&limit=24`),
+  searchMovies:(q,{genre='',signal}={})=>{
+    const params=new URLSearchParams({limit:'24'})
+    if(q) params.set('q',q)
+    if(genre) params.set('genre',genre)
+    return request(`/api/catalogue/search?${params}`,{signal})
+  },
   siteHero:()=>request('/api/site/hero'),
   chat:body=>request('/api/chat',{method:'POST',body:JSON.stringify(body)}),
   compare:body=>request('/api/compare',{method:'POST',body:JSON.stringify(body)}),
   similar:body=>request('/api/similar',{method:'POST',body:JSON.stringify(body)}),
-  tournamentSignal:body=>request('/api/compare/tournament-signal',{method:'POST',body:JSON.stringify(body)}),
   plan:body=>request('/api/plan',{method:'POST',body:JSON.stringify(body)}),
   flag:body=>request('/api/feedback',{method:'POST',body:JSON.stringify(body)}),
   watched:body=>request('/api/watch-events',{method:'POST',body:JSON.stringify(body)}),
