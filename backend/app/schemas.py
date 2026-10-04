@@ -32,11 +32,6 @@ class CompareRequest(BaseModel):
     free_minutes: int | None = Field(default=None, ge=30, le=600)
     scenario: str | None = Field(default=None, max_length=300)
 
-class TournamentSignalRequest(BaseModel):
-    winner_movie_id: int
-    loser_movie_id: int
-    reason: str = Field(min_length=2, max_length=80)
-
 class PlanRequest(BaseModel):
     genres: list[str] = Field(default_factory=list, max_length=5)
     mood: str | None = Field(default=None, max_length=40)

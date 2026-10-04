@@ -11,6 +11,24 @@ def test_health_and_movies():
         assert c.get("/api/health").json()["agents"]==6
         assert len(c.get("/api/movies").json())>=30
 
+def test_catalogue_search_ranks_titles_and_applies_genre(monkeypatch):
+    from app.routers import movies as movie_routes
+    monkeypatch.setattr(movie_routes.settings,"tmdb_api_key","configured-for-test")
+    with TestClient(app) as c:
+        exact=c.get('/api/catalogue/search',params={'q':'dark knight'})
+        assert exact.status_code==200
+        assert exact.json()['results'][0]['title']=='The Dark Knight'
+        assert exact.json()['external_search'] is False
+
+        broad=c.get('/api/catalogue/search',params={'q':'the'})
+        assert broad.status_code==200
+        assert all('the' in movie['title'].lower() for movie in broad.json()['results'][:5])
+
+        filtered=c.get('/api/catalogue/search',params={'genre':'Animation'})
+        assert filtered.status_code==200
+        assert filtered.json()['results']
+        assert all('Animation' in movie['genres'] for movie in filtered.json()['results'])
+
 def test_demo_chat():
     with TestClient(app) as c:
         assert c.post("/api/auth/demo").status_code==200
