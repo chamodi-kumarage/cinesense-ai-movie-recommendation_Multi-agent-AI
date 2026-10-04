@@ -77,9 +77,8 @@ def allowed_family_profiles(db: Session, user) -> list[Profile]:
         account = db.get(User, member.user_id)
         if account:
             account_profile_ids.append(ensure_default_profile(db, account).id)
-    managed = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or [-1])).all()
     account_profiles = db.query(Profile).filter(Profile.id.in_(account_profile_ids or [-1])).all()
-    return account_profiles + managed
+    return account_profiles
 
 
 def require_family(user, db: Session | None = None):
@@ -97,10 +96,12 @@ def household(db: Session = Depends(get_db), user=Depends(get_current_user)):
         if expires <= current: invite.status = "expired"
     db.commit()
     member_rows = [member_payload(db, m) for m in members]
-    account_profile_ids = {m["profile_id"] for m in member_rows if m["profile_id"]}
-    managed_profiles = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or {-1})).order_by(Profile.id).all()
+    for row, member in zip(member_rows, members):
+        if member.role not in {"owner", "member"}:
+            member.role = "member"
+            row["role"] = "member"
     participants = [{"id": m["profile_id"], "name": m["display_name"] or m["email"].split("@")[0], "subtitle": m["email"], "participant_type": "account", "role": m["role"], "user_id": m["user_id"]} for m in member_rows if m["profile_id"]]
-    participants += [{"id": p.id, "name": decrypt_text(p.name_enc), "subtitle": "Managed child / guest profile", "participant_type": "managed_profile", "role": "profile", "user_id": p.user_id} for p in managed_profiles]
+    db.commit()
     return {"group_id": group.id, "owner_user_id": group.owner_user_id, "current_role": membership.role, "can_manage": membership.role == "owner", "max_members": MAX_FAMILY_PEOPLE, "members": member_rows, "participants": participants, "pending_invites": [{"id": i.id, "email": i.invited_email, "status": i.status, "expires_at": i.expires_at, "created_at": i.created_at} for i in pending if i.status == "pending"]}
 
 @router.get("/members")
@@ -122,9 +123,9 @@ def create_family_invite(data: FamilyInviteCreateRequest, db: Session = Depends(
     if existing:
         existing.status = "expired"
     raw_token = secrets.token_urlsafe(32)
-    invite = FamilyInvite(family_group_id=group.id, invited_email=email, invited_by_user_id=user.id, role=data.role, token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), status="pending", expires_at=now_utc() + timedelta(days=7))
+    invite = FamilyInvite(family_group_id=group.id, invited_email=email, invited_by_user_id=user.id, role="member", token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), status="pending", expires_at=now_utc() + timedelta(days=7))
     db.add(invite); db.commit(); db.refresh(invite)
-    return {"id": invite.id, "email": email, "role": data.role, "status": invite.status, "expires_at": invite.expires_at, "token": raw_token, "invite_path": f"/?family_invite={raw_token}", "message": "Invitation created. Share this demo link with the invited person."}
+    return {"id": invite.id, "email": email, "role": "member", "status": invite.status, "expires_at": invite.expires_at, "token": raw_token, "invite_path": f"/?family_invite={raw_token}", "message": "Invitation created. Share this demo link with the invited person."}
 
 @router.post("/invites/accept")
 def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
@@ -143,7 +144,7 @@ def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(
     active_count = db.query(FamilyMember).filter(FamilyMember.family_group_id == invite.family_group_id, FamilyMember.status == "active").count()
     if active_count >= MAX_FAMILY_PEOPLE:
         raise HTTPException(409, "This family household is already full.")
-    db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role=invite.role, status="active"))
+    db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role="member", status="active"))
     invite.status = "accepted"; db.commit()
     return {"ok": True, "message": "You joined the CineSense family household.", "group_id": invite.family_group_id}
 
@@ -222,6 +223,7 @@ def list_profiles(db: Session = Depends(get_db), user=Depends(get_current_user))
 @router.post("/profiles")
 def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
+    raise HTTPException(410, "Separate Family profiles were removed. Invite each family member with their own account.")
     ensure_default_profile(db, user)
     rows = db.query(Profile).filter(Profile.user_id == user.id).all()
     if len(rows) >= 5:
@@ -244,6 +246,7 @@ def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), us
 @router.put("/profiles/{profile_id}")
 def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
+    raise HTTPException(410, "Separate Family profiles were removed. Preferences belong to each member account.")
     profile = owned_profile(db, user.id, profile_id)
     if data.name is not None:
         normalized = data.name.strip().casefold()
@@ -264,6 +267,7 @@ def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = De
 @router.delete("/profiles/{profile_id}")
 def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
+    raise HTTPException(410, "Separate Family profiles were removed. Remove the household member instead.")
     rows = db.query(Profile).filter(Profile.user_id == user.id).order_by(Profile.id).all()
     if len(rows) <= 1:
         raise HTTPException(409, "At least one profile must remain.")
@@ -284,6 +288,7 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(
 
 @router.post("/profiles/switch")
 def switch_profile(data: ProfileSwitchRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    raise HTTPException(410, "Profile switching was removed. The signed-in account is always the active participant.")
     require_family(user, db)
     ensure_default_profile(db, user)
     profile = owned_profile(db, user.id, data.profile_id)

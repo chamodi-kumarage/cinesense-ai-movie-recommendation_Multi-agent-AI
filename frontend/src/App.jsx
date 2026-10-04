@@ -176,7 +176,8 @@ function MovieDetailModal({ movie, open, onClose, onCompare, onFindSimilar, sele
   const summarize = async () => {
     if (!user) { onNeedAuth(); return }
     setBusy(true)
-    try {
+    try 
+    {
       const result = await api.summarize(movie.id)
       setSummary(result.summary || movie.overview)
     } catch {
@@ -1098,18 +1099,17 @@ function FamilyModal({ open, onClose, user }) {
   const [notice,setNotice]=useState('')
   const [household,setHousehold]=useState(null)
   const [inviteEmail,setInviteEmail]=useState('')
-  const [inviteRole,setInviteRole]=useState('member')
   const [inviteLink,setInviteLink]=useState('')
 
   const load=async()=>{
     if(!open||!user)return
-    try{const [rows,home]=await Promise.all([api.profiles(),api.familyHousehold()]);setProfiles(rows);setHousehold(home);setError('')}catch(e){setError(e.message)}
+    try{const home=await api.familyHousehold();setHousehold(home);setError('')}catch(e){setError(e.message)}
   }
   useEffect(()=>{if(open){load();setGroup(null);setComparison(null);setResult(null);setCompareIds([]);setVotes({});setHistory(null);setNotice('');const token=new URLSearchParams(window.location.search).get('family_invite');if(token){api.acceptFamilyInvite(token).then(r=>{setNotice(r.message);window.history.replaceState({},'',window.location.pathname);load()}).catch(e=>setError(e.message))}}},[open,user?.id])
 
   const inviteMember=async()=>{
     if(!inviteEmail.trim()){setError('Enter the family member email address.');return}
-    setBusy(true);try{const r=await api.inviteFamilyMember({email:inviteEmail.trim(),role:inviteRole});setInviteLink(`${window.location.origin}${r.invite_path}`);setInviteEmail('');setNotice('Invitation created. Copy and share the link below.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}
+    setBusy(true);try{const r=await api.inviteFamilyMember({email:inviteEmail.trim(),role:'member'});setInviteLink(`${window.location.origin}${r.invite_path}`);setInviteEmail('');setNotice('Invitation created. Copy and share the link below.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}
   }
   const changeMemberRole=async(id,role)=>{setBusy(true);try{await api.updateFamilyMemberRole(id,role);setNotice('Family member role updated.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const removeMember=async id=>{if(!confirm('Remove this user from the Family plan?'))return;setBusy(true);try{await api.removeFamilyMember(id);setNotice('Family member removed.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
@@ -1150,45 +1150,21 @@ function FamilyModal({ open, onClose, user }) {
     setBusy(true);try{const r=await api.groupVote(group.session_id,profileId,movieId);setResult(r);setError('')}catch(e){setError(e.message)}finally{setBusy(false)}
   }
   const participants=household?.participants||[]
-  const managedIds=new Set(participants.filter(p=>p.participant_type==='managed_profile').map(p=>p.id))
-  const managedProfiles=profiles.filter(p=>managedIds.has(p.id))
 
-  return <Modal open={open} onClose={onClose} title="Family profiles & group choice" eyebrow="5 PRIVATE PROFILES · CONSENSUS SCORING · HUMAN VOTING" wide>
+  return <Modal open={open} onClose={onClose} title="Family members & group choice" eyebrow="5 FAMILY ACCOUNTS · CONSENSUS SCORING · HUMAN VOTING" wide>
     {user?.plan!=='family'&&!household?<div className="empty-card"><div className="big-symbol">⌂</div><h3>Family plan feature</h3><p>Upgrade to Family or accept a household invitation to use shared profiles, preferences, and group decisions.</p></div>:<>
       {error&&<div className="error-box">{error}</div>}{notice&&<div className="success-box">{notice}</div>}
       {household&&<section className="family-household family-panel">
         <div className="family-section-head"><div><span className="overline">FAMILY HOUSEHOLD</span><h3>Plan owner & members</h3><p>{household.members.length}/{household.max_members} places used · Your role: {household.current_role}</p></div>{household.current_role==='owner'&&<span className="owner-badge">Owner</span>}</div>
-        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<><select value={m.role} onChange={e=>changeMemberRole(m.id,e.target.value)} disabled={busy}><option value="member">Member</option><option value="child">Child</option></select><button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button></>:null}</div>)}</div>
-        {household.can_manage&&<div className="household-invite"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><select value={inviteRole} onChange={e=>setInviteRole(e.target.value)}><option value="member">Member</option><option value="child">Child</option></select><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
+        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button>:null}</div>)}</div>
+        {household.can_manage&&<div className="household-invite account-only"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
         {inviteLink&&<div className="invite-link"><code>{inviteLink}</code><button className="btn-secondary" onClick={copyInvite}>Copy link</button></div>}
         {!!household.pending_invites.length&&<div className="pending-invites"><strong>Pending invitations</strong>{household.pending_invites.map(i=><span key={i.id}>{i.email} · expires {new Date(i.expires_at).toLocaleDateString()}</span>)}</div>}
       </section>}
       <div className="family-layout">
-        <section className="family-panel">
-          <div className="family-section-head"><div><span className="overline">01 · MANAGED PROFILES</span><h3>Children & guests</h3><p>Real members use their own accounts. Profiles are only for children or guests without a login.</p></div>{household?.can_manage&&<button className="btn-secondary" onClick={startNew}>+ Child / guest</button>}</div>
-          {!household?.can_manage&&<div className="account-profile-note"><strong>Your account is your profile</strong><p>Your preferences, mood history, watch history, and votes stay attached to your own CineSense login. You do not need another profile.</p></div>}
-          {household?.can_manage&&<><div className="profile-grid enhanced">{managedProfiles.map(p=><article className={`family-profile ${p.active?'active':''}`} key={p.id}>
-            <button className="profile-main" onClick={()=>switchTo(p.id)} disabled={busy}><span>{p.name?.[0]?.toUpperCase()||'P'}</span><strong>{p.name}</strong><small>{p.active?'✓ Active profile':'Use this profile'}</small></button>
-            <div className="profile-mini-stats"><span>{p.history_count||0} watched</span><span>{p.preferences?.preferred_genres?.slice(0,2).join(' · ')||'No saved genres'}</span></div>
-            <div className="profile-actions"><button onClick={()=>editProfile(p)}>Edit</button><button onClick={()=>showHistory(p)}>History</button><button className="danger-link" onClick={()=>remove(p.id)}>Delete</button></div>
-          </article>)}{!managedProfiles.length&&<div className="empty-managed-profile"><span>Optional</span><p>Add a child or guest only when they will not have their own CineSense login.</p></div>}</div>
-
-          <div className="profile-editor">
-            <div className="family-section-head compact"><div><span className="overline">PROFILE SETTINGS</span><h4>{editor.id?'Edit profile':'Create profile'}</h4></div></div>
-            <label>Display name<input value={editor.name} onChange={e=>setEditor({...editor,name:e.target.value})} maxLength={50} placeholder="e.g. Kids, Guest"/></label>
-            <div className="preference-block"><strong>Preferred genres</strong><div className="choice-chips">{genreOptions.map(g=><button type="button" className={editor.preferred_genres.includes(g)?'active':''} onClick={()=>toggleList('preferred_genres',g)} key={g}>{g}</button>)}</div></div>
-            <div className="preference-block"><strong>Disliked genres</strong><div className="choice-chips danger">{genreOptions.map(g=><button type="button" className={editor.disliked_genres.includes(g)?'active':''} onClick={()=>toggleList('disliked_genres',g)} key={g}>{g}</button>)}</div></div>
-            <div className="preference-block"><strong>Favourite moods</strong><div className="choice-chips">{moodOptions.map(m=><button type="button" className={editor.preferred_moods.includes(m)?'active':''} onClick={()=>toggleList('preferred_moods',m)} key={m}>{m}</button>)}</div></div>
-            <div className="form-actions"><button className="btn-primary" disabled={busy} onClick={saveProfile}>{editor.id?'Save profile changes':'Create profile'}</button>{editor.id&&<button className="btn-secondary" onClick={startNew}>Cancel</button>}</div>
-          </div>
-
-          {history&&<div className="profile-history-card"><div className="family-section-head compact"><div><span className="overline">PRIVATE HISTORY</span><h4>{history.profile.name}</h4></div><button className="panel-close" onClick={()=>setHistory(null)}>×</button></div><p>Learned genres: {history.prefs.learned_genres?.join(', ')||'Not enough history yet'} · Learned moods: {history.prefs.learned_moods?.join(', ')||'Not enough history yet'}</p><div className="history-list">{history.rows.slice(0,8).map((x,i)=><div key={`${x.movie.id}-${i}`}><strong>{x.movie.title}</strong><span>{x.rating?`${x.rating}/5`:'Watched'}</span></div>)}{!history.rows.length&&<small>No watched movies recorded for this profile yet.</small>}</div></div>}
-          </>}
-        </section>
-
         <section className="family-panel group-panel">
-          <div className="family-section-head"><div><span className="overline">02 · GROUP SESSION</span><h3>Who is watching?</h3><p>Choose from one combined list of real accounts and optional managed profiles.</p></div></div>
-          <div className="participant-list">{participants.map(p=><label className={`participant-choice ${selected.includes(p.id)?'selected':''}`} key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/><span>{p.name?.[0]?.toUpperCase()||'P'}</span><div><strong>{p.name}</strong><small>{p.participant_type==='account'?`${p.role} account`:p.subtitle}</small></div></label>)}</div>
+          <div className="family-section-head"><div><span className="overline">01 · GROUP SESSION</span><h3>Who is watching?</h3><p>Select real family accounts. Each person keeps their own preferences, history, mood, and vote.</p></div></div>
+          <div className="participant-list">{participants.map(p=><label className={`participant-choice ${selected.includes(p.id)?'selected':''}`} key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/><span>{p.name?.[0]?.toUpperCase()||'P'}</span><div><strong>{p.name}</strong><small>{p.role} account</small></div></label>)}</div>
           <div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
 
           {group?.results?.length>0&&<div className="group-results advanced"><div className="family-section-head compact"><div><span className="overline">03 · CONSENSUS RESULTS</span><h4>Best compromises</h4></div><span className="session-pill">Session {group.session_id.slice(0,7)}</span></div>{group.results.slice(0,8).map(m=><div className="group-pick scored" key={m.id}><Poster movie={m} compact/><div className="group-pick-main"><div className="group-pick-title"><strong>{m.title}</strong><b>{m.group_score}% consensus</b></div><p>{m.reason}</p><div className="member-score-row">{m.consensus?.member_scores?.map(ms=><span className={ms.conflicts?.length?'conflict':ms.score>=60?'good':''} key={ms.profile_id}>{ms.profile_name} {Math.round(ms.score)}%</span>)}</div></div><label className="compare-check"><input type="checkbox" checked={compareIds.includes(m.id)} onChange={()=>toggleCompare(m.id)}/> Compare</label></div>)}<button className="btn-secondary full" disabled={compareIds.length<2||compareIds.length>4||busy} onClick={compare}>Compare selected ({compareIds.length}/4)</button></div>}

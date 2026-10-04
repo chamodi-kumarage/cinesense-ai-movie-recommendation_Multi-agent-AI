@@ -72,7 +72,7 @@ def test_profile_watch_rating_is_not_plaintext():
         db.close()
 
 
-def test_family_profiles_and_group_choice():
+def test_family_uses_accounts_instead_of_extra_profiles():
     from app.db import SessionLocal
     from app.models import User
     with TestClient(app) as c:
@@ -85,13 +85,11 @@ def test_family_profiles_and_group_choice():
         finally:
             db.close()
         try:
-            profiles = c.get('/api/family/profiles').json()
-            if len(profiles) < 2:
-                assert c.post('/api/family/profiles', json={'name': 'Movie Buddy'}).status_code == 200
-            profiles = c.get('/api/family/profiles').json()
-            ids = [p['id'] for p in profiles[:2]]
-            r = c.post('/api/family/group-choice', json={'profile_ids': ids, 'free_minutes': 180})
-            assert r.status_code == 200 and r.json()['results']
+            home = c.get('/api/family/household')
+            assert home.status_code == 200
+            assert home.json()['participants']
+            assert all(p['participant_type'] == 'account' for p in home.json()['participants'])
+            assert c.post('/api/family/profiles', json={'name': 'Movie Buddy'}).status_code == 410
         finally:
             db = SessionLocal()
             try:
@@ -188,7 +186,7 @@ def test_weekly_summary_counts_watched_titles():
         assert weekly.json()['watch_minutes'] >= movie['runtime']
 
 
-def test_family_profile_crud_preferences_consensus_compare_and_voting():
+def test_removed_family_profile_mutations_are_rejected():
     from app.db import SessionLocal
     from app.models import User
     with TestClient(app) as c:
@@ -201,64 +199,12 @@ def test_family_profile_crud_preferences_consensus_compare_and_voting():
         finally:
             db.close()
         try:
-            profiles = c.get('/api/family/profiles').json()
-            # Keep room below the five-profile limit in reused local test databases.
-            for p in profiles[3:]:
-                c.delete(f"/api/family/profiles/{p['id']}")
-            profiles = c.get('/api/family/profiles').json()
-            while len(profiles) < 3:
-                idx = len(profiles) + 1
-                r = c.post('/api/family/profiles', json={
-                    'name': f'FamilyTest{idx}',
-                    'preferred_genres': ['Comedy'] if idx % 2 else ['Action'],
-                    'disliked_genres': ['Horror'],
-                    'preferred_moods': ['Relaxed'],
-                })
-                assert r.status_code == 200, r.text
-                profiles = c.get('/api/family/profiles').json()
-
-            target = profiles[1]
-            update = c.put(f"/api/family/profiles/{target['id']}", json={
-                'name': target['name'],
-                'preferred_genres': ['Comedy', 'Romance'],
-                'disliked_genres': ['Horror'],
-                'preferred_moods': ['Relaxed', 'Happy'],
-            })
-            assert update.status_code == 200, update.text
-            assert 'Comedy' in update.json()['preferences']['preferred_genres']
-
-            switch = c.post('/api/family/profiles/switch', json={'profile_id': target['id']})
-            assert switch.status_code == 200 and switch.json()['active'] is True
-
-            movie = c.get('/api/movies').json()[0]
-            watch = c.post('/api/watch-events', json={'movie_id': movie['id'], 'watched': True, 'rating': 4.5})
-            assert watch.status_code == 200 and watch.json()['profile_id'] == target['id']
-            history = c.get(f"/api/family/profiles/{target['id']}/history")
-            assert history.status_code == 200 and history.json()
-
-            ids = [p['id'] for p in c.get('/api/family/profiles').json()[:3]]
-            choice = c.post('/api/family/group-choice', json={
-                'profile_ids': ids, 'free_minutes': 180,
-                'mood': 'Relaxed', 'request_text': 'something warm and easy to watch'
-            })
-            assert choice.status_code == 200, choice.text
-            body = choice.json()
-            assert body['session_id'] and len(body['results']) >= 2
-            assert 'group_score' in body['results'][0]
-            assert len(body['results'][0]['consensus']['member_scores']) == len(ids)
-
-            mids = [m['id'] for m in body['results'][:2]]
-            comp = c.post(f"/api/family/groups/{body['session_id']}/compare", json={'movie_ids': mids})
-            assert comp.status_code == 200, comp.text
-            assert comp.json()['group_consensus']
-
-            for pid in ids:
-                vote = c.post(f"/api/family/groups/{body['session_id']}/vote", json={'profile_id': pid, 'movie_id': mids[0]})
-                assert vote.status_code == 200, vote.text
-            result = c.get(f"/api/family/groups/{body['session_id']}/result")
-            assert result.status_code == 200
-            assert result.json()['winner']['movie_id'] == mids[0]
-            assert result.json()['status'] == 'complete'
+            home = c.get('/api/family/household').json()
+            profile_id = home['participants'][0]['id']
+            assert c.post('/api/family/profiles', json={'name': 'Guest'}).status_code == 410
+            assert c.put(f'/api/family/profiles/{profile_id}', json={'name': 'Changed'}).status_code == 410
+            assert c.delete(f'/api/family/profiles/{profile_id}').status_code == 410
+            assert c.post('/api/family/profiles/switch', json={'profile_id': profile_id}).status_code == 410
         finally:
             db = SessionLocal()
             try:
@@ -286,7 +232,7 @@ def test_family_owner_invite_accept_role_and_remove():
             db.close()
         home = owner_client.get('/api/family/household')
         assert home.status_code == 200 and home.json()['current_role'] == 'owner'
-        invite = owner_client.post('/api/family/invites', json={'email': invited_email, 'role': 'child'})
+        invite = owner_client.post('/api/family/invites', json={'email': invited_email, 'role': 'member'})
         assert invite.status_code == 200, invite.text
         token = invite.json()['token']
 
@@ -296,7 +242,7 @@ def test_family_owner_invite_accept_role_and_remove():
             accepted = member_client.post('/api/family/invites/accept', json={'token': token})
             assert accepted.status_code == 200, accepted.text
             member_home = member_client.get('/api/family/household')
-            assert member_home.status_code == 200 and member_home.json()['current_role'] == 'child'
+            assert member_home.status_code == 200 and member_home.json()['current_role'] == 'member'
             assert member_client.post('/api/family/invites', json={'email': 'blocked@example.com'}).status_code == 403
             assert member_client.post('/api/family/profiles', json={'name': 'Duplicate profile'}).status_code == 403
 
