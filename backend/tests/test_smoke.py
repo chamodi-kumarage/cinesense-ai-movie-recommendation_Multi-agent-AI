@@ -1,3 +1,4 @@
+from test_watch_insights import history
 import os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -72,30 +73,13 @@ def test_profile_watch_rating_is_not_plaintext():
         db.close()
 
 
-def test_family_uses_accounts_instead_of_extra_profiles():
-    from app.db import SessionLocal
-    from app.models import User
-    with TestClient(app) as c:
-        c.post('/api/auth/demo')
-        db = SessionLocal()
-        try:
-            u = db.query(User).filter(User.email == 'demo@cinesense.ai').first()
-            old = u.plan
-            u.plan = 'family'; db.commit()
-        finally:
-            db.close()
-        try:
-            home = c.get('/api/family/household')
-            assert home.status_code == 200
-            assert home.json()['participants']
-            assert all(p['participant_type'] == 'account' for p in home.json()['participants'])
-            assert c.post('/api/family/profiles', json={'name': 'Movie Buddy'}).status_code == 410
-        finally:
-            db = SessionLocal()
-            try:
-                u = db.query(User).filter(User.email == 'demo@cinesense.ai').first(); u.plan = old; db.commit()
-            finally:
-                db.close()
+def test_family_profiles_and_household_coexist(history):
+    c, _, _, _, _ = history
+    home = c.get('/api/family/household')
+    assert home.status_code == 200 and home.json()['participants']
+    created = c.post('/api/family/profiles', json={'name':'Movie Buddy'})
+    assert created.status_code == 200
+    assert any(p['id'] == created.json()['id'] for p in c.get('/api/family/profiles').json())
 
 
 def test_b2b_usage_counter():
@@ -186,32 +170,17 @@ def test_weekly_summary_counts_watched_titles():
         assert weekly.json()['watch_minutes'] >= movie['runtime']
 
 
-def test_removed_family_profile_mutations_are_rejected():
-    from app.db import SessionLocal
-    from app.models import User
-    with TestClient(app) as c:
-        assert c.post('/api/auth/demo').status_code == 200
-        db = SessionLocal()
-        try:
-            user = db.query(User).filter(User.email == 'demo@cinesense.ai').first()
-            old_plan = user.plan
-            user.plan = 'family'; db.commit()
-        finally:
-            db.close()
-        try:
-            home = c.get('/api/family/household').json()
-            profile_id = home['participants'][0]['id']
-            assert c.post('/api/family/profiles', json={'name': 'Guest'}).status_code == 410
-            assert c.put(f'/api/family/profiles/{profile_id}', json={'name': 'Changed'}).status_code == 410
-            assert c.delete(f'/api/family/profiles/{profile_id}').status_code == 410
-            assert c.post('/api/family/profiles/switch', json={'profile_id': profile_id}).status_code == 410
-        finally:
-            db = SessionLocal()
-            try:
-                user = db.query(User).filter(User.email == 'demo@cinesense.ai').first()
-                user.plan = old_plan; db.commit()
-            finally:
-                db.close()
+def test_family_profile_mutations_are_restored(history):
+    c, _, _, _, _ = history
+    created = c.post('/api/family/profiles', json={'name':'Guest'})
+    assert created.status_code == 200
+    pid = created.json()['id']
+    assert c.put(f'/api/family/profiles/{pid}', json={'name':'Changed','preferred_genres':['Comedy']}).status_code == 200
+    assert c.post('/api/family/profiles/switch', json={'profile_id':pid}).json()['active']
+    assert c.get('/api/planner/weekly-summary').json()['profile_name'] == 'Changed'
+    session = c.post('/api/family/groups', json={'profile_ids':[p['id'] for p in c.get('/api/family/profiles').json()][:2], 'free_minutes':180})
+    assert session.status_code == 200 and len(session.json()['members']) == 2
+    assert c.delete(f'/api/family/profiles/{pid}').status_code == 200
 
 
 def test_family_owner_invite_accept_role_and_remove():

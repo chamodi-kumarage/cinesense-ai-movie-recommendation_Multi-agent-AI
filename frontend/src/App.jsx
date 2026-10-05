@@ -1190,7 +1190,7 @@ function FamilyModal({ open, onClose, user }) {
 
   const load=async()=>{
     if(!open||!user)return
-    try{const home=await api.familyHousehold();setHousehold(home);setError('')}catch(e){setError(e.message)}
+    try{const rows=await api.profiles();setProfiles(rows);setSelected(ids=>ids.filter(id=>rows.some(p=>p.id===id)));setError('')}catch(e){setError(e.message)}
   }
   useEffect(()=>{if(open){load();setGroup(null);setComparison(null);setResult(null);setCompareIds([]);setVotes({});setHistory(null);setNotice('');const token=new URLSearchParams(window.location.search).get('family_invite');if(token){api.acceptFamilyInvite(token).then(r=>{setNotice(r.message);window.history.replaceState({},'',window.location.pathname);load()}).catch(e=>setError(e.message))}}},[open,user?.id])
 
@@ -1239,7 +1239,7 @@ function FamilyModal({ open, onClose, user }) {
   const toggleMember=id=>setSelected(x=>x.includes(id)?x.filter(v=>v!==id):[...x,id].slice(0,5))
 
   const createChoice=async()=>{
-    if(selected.length<2){setError('Choose at least two participating family profiles.');return}
+    if(selected.length<2){setError('Choose at least two participating family members.');return}
     setBusy(true)
     try{
       const response=await api.groupChoice({profile_ids:selected,free_minutes:Number(minutes)||180,mood:groupMood||null,request_text:requestText})
@@ -1257,22 +1257,23 @@ function FamilyModal({ open, onClose, user }) {
   }
   const participants=household?.participants||[]
 
-  return <Modal open={open} onClose={onClose} title="Family members & group choice" eyebrow="5 FAMILY ACCOUNTS · CONSENSUS SCORING · HUMAN VOTING" wide>
+  return <Modal open={open} onClose={onClose} title="Family profiles & group choice" eyebrow="5 PRIVATE PROFILES · CONSENSUS SCORING · HUMAN VOTING" wide>
+    {error&&!household&&<div className="error-box">{error}<button className="btn-secondary" onClick={load} disabled={busy}>Retry</button></div>}
     {user?.plan!=='family'&&!household?<div className="empty-card"><div className="big-symbol">⌂</div><h3>Family plan feature</h3><p>Upgrade to Family or accept a household invitation to use shared profiles, preferences, and group decisions.</p></div>:<>
       {error&&<div className="error-box">{error}</div>}{notice&&<div className="success-box">{notice}</div>}
       {household&&<section className="family-household family-panel">
         <div className="family-section-head"><div><span className="overline">FAMILY HOUSEHOLD</span><h3>Plan owner & members</h3><p>{household.members.length}/{household.max_members} places used · Your role: {household.current_role}</p></div>{household.current_role==='owner'&&<span className="owner-badge">Owner</span>}</div>
-        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button>:null}</div>)}</div>
-        {household.can_manage&&<div className="household-invite account-only"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
+        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.display_name||m.email}</strong><small>{m.email} | {m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button>:null}</div>)}</div>
+        {household.can_manage&&<div className="household-invite account-only"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Create invite link</button></div>}
         {inviteLink&&<div className="invite-link"><code>{inviteLink}</code><button className="btn-secondary" onClick={copyInvite}>Copy link</button></div>}
         {!!household.pending_invites.length&&<div className="pending-invites"><strong>Pending invitations</strong>{household.pending_invites.map(i=><span key={i.id}>{i.email} · expires {new Date(i.expires_at).toLocaleDateString()}</span>)}</div>}
       </section>}
-      <div className="family-layout">
+      <div className="family-layout family-profiles-layout">
         <section className="family-panel">
           <div className="family-section-head"><div><span className="overline">01 · PROFILES</span><h3>Who is watching?</h3><p>Each profile has separate preferences and encrypted movie history.</p></div><button className="btn-secondary" onClick={startNew}>+ New profile</button></div>
           <div className="profile-grid enhanced">{profiles.map(p=><article className={`family-profile ${p.active?'active':''}`} key={p.id}>
-            <button className="profile-main" onClick={()=>switchTo(p.id)} disabled={busy}><span>{p.name?.[0]?.toUpperCase()||'P'}</span><strong>{p.name}</strong><small>{p.active?'✓ Active profile':'Use this profile'}</small></button>
-            <div className="profile-mini-stats"><span>{p.history_count||0} watched</span><span>{p.preferences?.preferred_genres?.slice(0,2).join(' · ')||'No saved genres'}</span></div>
+            <button className="profile-main" onClick={()=>switchTo(p.id)} disabled={busy}><span className="profile-avatar">{p.photo_url?<img src={api.profilePhotoUrl(p.photo_url)} alt={p.name+' profile photo'}/>:p.name?.[0]?.toUpperCase()||'P'}</span><strong>{p.name}</strong><small>{p.active?'✓ Active profile':'Use this profile'}</small></button>
+            <div className="profile-photo-actions"><label className="photo-upload-button">{p.photo_url?'Change photo':'Add photo'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={e=>{uploadPhoto(p.id,e.target.files?.[0]);e.target.value=''}}/></label>{p.photo_url&&<button disabled={busy} onClick={()=>removePhoto(p.id)}>Remove photo</button>}</div><div className="profile-mini-stats"><span>{p.history_count||0} watched</span><span>{p.preferences?.preferred_genres?.slice(0,2).join(' · ')||'No saved genres'}</span></div>
             <label className="member-check"><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/> Include in group</label>
             <div className="profile-actions"><button onClick={()=>editProfile(p)}>Edit</button><button onClick={()=>showHistory(p)}>History</button>{profiles.length>1&&<button className="danger-link" onClick={()=>remove(p.id)}>Delete</button>}</div>
           </article>)}</div>
@@ -1289,10 +1290,10 @@ function FamilyModal({ open, onClose, user }) {
           {history&&<div className="profile-history-card"><div className="family-section-head compact"><div><span className="overline">PRIVATE HISTORY</span><h4>{history.profile.name}</h4></div><button className="panel-close" onClick={()=>setHistory(null)}>×</button></div><p>Learned genres: {history.prefs.learned_genres?.join(', ')||'Not enough history yet'} · Learned moods: {history.prefs.learned_moods?.join(', ')||'Not enough history yet'}</p><div className="history-list">{history.rows.slice(0,8).map((x,i)=><div key={`${x.movie.id}-${i}`}><strong>{x.movie.title}</strong><span>{x.rating?`${x.rating}/5`:'Watched'}</span></div>)}{!history.rows.length&&<small>No watched movies recorded for this profile yet.</small>}</div></div>}
         </section>
 
+
         <section className="family-panel group-panel">
-          <div className="family-section-head"><div><span className="overline">01 · GROUP SESSION</span><h3>Who is watching?</h3><p>Select real family accounts. Each person keeps their own preferences, history, mood, and vote.</p></div></div>
-          <div className="participant-list">{participants.map(p=><label className={`participant-choice ${selected.includes(p.id)?'selected':''}`} key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/><span>{p.name?.[0]?.toUpperCase()||'P'}</span><div><strong>{p.name}</strong><small>{p.role} account</small></div></label>)}</div>
-          <div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
+          <div className="family-section-head"><div><span className="overline">01 · GROUP SESSION</span><h3>Who is watching?</h3><p>Select only the people watching tonight. CineSense scores compromise for every selected profile.</p></div></div>
+<div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
 
           {group?.results?.length>0&&<div className="group-results advanced"><div className="family-section-head compact"><div><span className="overline">03 · CONSENSUS RESULTS</span><h4>Best compromises</h4></div><span className="session-pill">Session {group.session_id.slice(0,7)}</span></div>{group.results.slice(0,8).map(m=><div className="group-pick scored" key={m.id}><Poster movie={m} compact/><div className="group-pick-main"><div className="group-pick-title"><strong>{m.title}</strong><b>{m.group_score}% consensus</b></div><p>{m.reason}</p><div className="member-score-row">{m.consensus?.member_scores?.map(ms=><span className={ms.conflicts?.length?'conflict':ms.score>=60?'good':''} key={ms.profile_id}>{ms.profile_name} {Math.round(ms.score)}%</span>)}</div></div><label className="compare-check"><input type="checkbox" checked={compareIds.includes(m.id)} onChange={()=>toggleCompare(m.id)}/> Compare</label></div>)}<button className="btn-secondary full" disabled={compareIds.length<2||compareIds.length>4||busy} onClick={compare}>Compare selected ({compareIds.length}/4)</button></div>}
 

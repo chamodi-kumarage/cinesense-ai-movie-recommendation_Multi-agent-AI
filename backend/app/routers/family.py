@@ -75,7 +75,7 @@ def family_owner_id(db: Session, user) -> int:
 def allowed_family_profiles(db: Session, user) -> list[Profile]:
     group, _ = family_access(db, user)
     members = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").all()
-    account_profile_ids = []
+    account_profile_ids = [p.id for p in db.query(Profile).filter(Profile.user_id == user.id).all()]
     for member in members:
         account = db.get(User, member.user_id)
         if account:
@@ -228,7 +228,6 @@ def list_profiles(db: Session = Depends(get_db), user=Depends(get_current_user))
 @router.post("/profiles")
 def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
-    raise HTTPException(410, "Separate Family profiles were removed. Invite each family member with their own account.")
     ensure_default_profile(db, user)
     rows = db.query(Profile).filter(Profile.user_id == user.id).all()
     if len(rows) >= 5:
@@ -251,7 +250,6 @@ def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), us
 @router.put("/profiles/{profile_id}")
 def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
-    raise HTTPException(410, "Separate Family profiles were removed. Preferences belong to each member account.")
     profile = owned_profile(db, user.id, profile_id)
     if data.name is not None:
         normalized = data.name.strip().casefold()
@@ -272,7 +270,6 @@ def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = De
 @router.delete("/profiles/{profile_id}")
 def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     require_owner(db, user)
-    raise HTTPException(410, "Separate Family profiles were removed. Remove the household member instead.")
     rows = db.query(Profile).filter(Profile.user_id == user.id).order_by(Profile.id).all()
     if len(rows) <= 1:
         raise HTTPException(409, "At least one profile must remain.")
@@ -294,7 +291,7 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(
 
 @router.put("/profiles/{profile_id}/photo", summary="Add or replace a profile photo")
 async def upload_profile_photo(profile_id: int, request: Request, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     profile = owned_profile(db, user.id, profile_id)
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if content_type not in {"image/jpeg", "image/png", "image/webp"}:
@@ -334,7 +331,7 @@ async def upload_profile_photo(profile_id: int, request: Request, db: Session = 
 
 @router.get("/profiles/{profile_id}/photo", summary="View a photo owned by your Family account")
 def get_profile_photo(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     owned_profile(db, user.id, profile_id)
     photo = db.get(ProfilePhoto, profile_id)
     if not photo:
@@ -344,7 +341,7 @@ def get_profile_photo(profile_id: int, db: Session = Depends(get_db), user=Depen
 
 @router.delete("/profiles/{profile_id}/photo", summary="Remove a profile photo")
 def remove_profile_photo(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_family(user)
+    require_family(user, db)
     profile = owned_profile(db, user.id, profile_id)
     photo = db.get(ProfilePhoto, profile_id)
     if photo:
@@ -355,7 +352,6 @@ def remove_profile_photo(profile_id: int, db: Session = Depends(get_db), user=De
 
 @router.post("/profiles/switch")
 def switch_profile(data: ProfileSwitchRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    raise HTTPException(410, "Profile switching was removed. The signed-in account is always the active participant.")
     require_family(user, db)
     ensure_default_profile(db, user)
     profile = owned_profile(db, user.id, data.profile_id)
