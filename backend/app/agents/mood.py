@@ -14,6 +14,17 @@ MOOD_MAP = {
 }
 GENRES = ["Action","Adventure","Animation","Comedy","Crime","Documentary","Drama","Family","Fantasy","History","Horror","Music","Mystery","Romance","Science Fiction","Thriller","War","Western"]
 
+def mood_term_is_negated(text: str, start: int) -> bool:
+    # Scope stays within a clause and permits feeling verbs/adverbs between
+    # a negator and an emotion. Do not carry negation into a new assertion.
+    prefix = re.split(r"[.!?;,\n]|\b(?:but|however|yet|because)\b", text[:start])[-1]
+    prefix = prefix.replace("\u2019", "'")
+    return bool(re.search(
+        r"\b(?:not|never|no|without|avoid|don't|doesn't|didn't|isn't|aren't|wasn't|weren't|can't|cannot|couldn't|wouldn't|shouldn't)\s+"
+        r"(?:(?:feel|feeling|felt|be|being|am|really|very|too|particularly|quite|at|all|a|bit|want|to|watch|anything|that|is|so|and|or)\s+){0,8}$",
+        prefix,
+    ))
+
 class MoodPreferenceAgent:
     name="mood_preference"
     def __init__(self):
@@ -40,9 +51,10 @@ class MoodPreferenceAgent:
         log_envelope(db,envelope);lower=text.lower();dismissed={x.lower() for x in (dismissed_moods or [])}
         scores={}
         for mood,words in MOOD_MAP.items():
-            score=sum(2 if re.search(rf"\b{re.escape(w)}\b",lower) else 0 for w in words)
-            # Negated mood terms should not drive the result.
-            score-=sum(2 for w in words if re.search(rf"\b(?:not|no|avoid|without)\s+(?:too\s+)?{re.escape(w)}\b",lower))
+            score=sum(2 for w in words if any(
+                not mood_term_is_negated(lower, match.start())
+                for match in re.finditer(rf"\b{re.escape(w)}\b",lower)
+            ))
             if score>0 and mood.lower() not in dismissed:scores[mood]=score
         mood=mood_override or (max(scores,key=scores.get) if scores else None)
         genres=[];disliked=[]

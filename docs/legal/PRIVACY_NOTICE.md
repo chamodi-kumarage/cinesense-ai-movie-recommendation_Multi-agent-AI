@@ -1,2 +1,0 @@
-# CineSense AI Privacy Notice (Project Draft)
-CineSense uses account information, consent status, encrypted chat content, recommendation feedback, and movie-viewing signals to provide recommendations and continuity. Sensitive text fields are encrypted at rest. Profile-specific ratings are stored encrypted. Agent traces avoid raw chat text. Chat history is limited by the configured retention period. Production deployments should publish contact details, lawful-basis/retention information applicable to their jurisdiction, and provider-specific subprocessors before launch.

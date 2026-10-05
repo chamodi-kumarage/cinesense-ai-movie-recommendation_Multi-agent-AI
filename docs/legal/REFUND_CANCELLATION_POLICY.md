@@ -1,2 +1,0 @@
-# CineSense AI Refund and Cancellation Policy (Project Draft)
-Users can request cancellation of a paid subscription. Stripe-backed cancellations are scheduled for the end of the current billing period unless a deployment chooses another policy. Refund eligibility must be defined by the production operator and applicable consumer law before commercial launch. Failed payments are handled through payment-provider webhooks and subscription status updates.
