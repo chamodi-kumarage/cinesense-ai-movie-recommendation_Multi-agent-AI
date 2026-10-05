@@ -92,7 +92,9 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"]="SAMEORIGIN"
     response.headers["Referrer-Policy"]="strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"]="camera=(), microphone=(self), geolocation=()"
-    response.headers["Content-Security-Policy"]="default-src 'self'; img-src 'self' data: https://image.tmdb.org http://localhost:8000 http://127.0.0.1:8000; media-src 'self'; frame-src https://www.youtube.com https://youtube.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    app_csp="default-src 'self'; img-src 'self' data: https://image.tmdb.org http://localhost:8000 http://127.0.0.1:8000; media-src 'self'; frame-src https://www.youtube.com https://youtube.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    docs_csp="default-src 'self'; img-src 'self' data: https://image.tmdb.org http://localhost:8000 http://127.0.0.1:8000 https://fastapi.tiangolo.com; media-src 'self'; frame-src https://www.youtube.com https://youtube.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net"
+    response.headers["Content-Security-Policy"]=docs_csp if request.url.path=="/docs" else app_csp
     if settings.environment=="production":
         response.headers["Strict-Transport-Security"]="max-age=31536000; includeSubDomains"
     return response

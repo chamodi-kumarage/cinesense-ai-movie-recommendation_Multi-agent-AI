@@ -20,7 +20,7 @@ This addendum supersedes the earlier status/results below for V-01 through V-04 
 
 ### Current disposition of the 15 assessment cases
 
-“Pass” below means the revised test case has passing evidence in the baseline run and/or the remediation retest. Replaced environment-dependent checks are identified explicitly; their original production/browser behaviors remain limitations and are not inferred to pass.
+“Pass” below means the stated runtime check has passing evidence in the baseline run and/or the remediation retest. It does not mean every environment-dependent subcheck was exercised. Cases that require an unavailable environment or still lack end-to-end retest evidence are marked Inconclusive.
 
 | Case | Current result | Current evidence / remaining scope |
 |---|---|---|
@@ -339,7 +339,7 @@ This is the revised local test scope in the remediation retest matrix above. The
 
 ## 5. Vulnerabilities Identified
 
-The findings below describe the 2026-10-04 pre-remediation baseline. Their current code/test status is summarized in the 2026-10-05 addendum above; they are retained here to document the original defects and fixes.
+The findings below were reproduced in an isolated TestClient run using synthetic data. The evidence is sanitized, and external integrations and production deployment controls were outside the test environment.
 
 ### V-01 — Conversation memory and preferences are shared across family profiles
 
@@ -403,7 +403,7 @@ The findings below describe the 2026-10-04 pre-remediation baseline. Their curre
 
 ## 6. Risk Assessment
 
-The following is the pre-remediation baseline risk matrix. It is retained to show why the fixes were prioritized; it is not a statement that these four findings remain open after the retest.
+Use this matrix to summarize confirmed findings. Risk level should follow the stated impact and likelihood rationale; explain any exception.
 
 | Vulnerability | Data / asset | Impact | Likelihood | Risk level / severity | Evidence | Mitigation priority |
 |---|---|---|---|---|---|---|
@@ -472,7 +472,7 @@ The JSON file above is the existing runtime evidence artifact. The screenshots l
 | `06-agent-trace-canary.png` | T-10, V-02 | A redacted database/query result or test output showing the synthetic canary-presence check in `AgentTrace.payload_safe`. | Show only `canary_found=false` or an equivalent boolean and row metadata. **Do not display or include the canary text itself.** |
 | `07-consent-controls.png` | T-13, V-04 | Synthetic account's chat denial after consent withdrawal. | Withdrawal is saved as false; subsequent chat returns `403`; no real account identifiers. |
 | `08-retention-route-check.png` | T-14, V-03 | Sanitized export/delete test output and post-delete row counts for selected application tables. | Export returns selected account data; deletion removes tested rows. State that this does not test backups or production operational logs. |
-| `09-provider-and-calendar-limits.png` | T-12, T-15 | Mock-provider adapter request and mocked Calendar OAuth callback test output. | Show the captured adapter message structure, encrypted-token storage result, replay rejection, and second-account isolation. Caption that no live provider/OAuth network call was made. |
+| `09-provider-and-calendar-limits.png` | T-12, T-15 | Offline LLM configuration and calendar connect result from the isolated test. | Provider calls were disabled/not made; calendar returned `503` because OAuth credentials were absent. This is limitation evidence, not proof of provider safety. |
 | `10-error-response.png` | T-11 | Invalid empty-message request and sanitized validation response. | `422` without a stack trace or secret markers. |
 
 #### How to capture and label the evidence
