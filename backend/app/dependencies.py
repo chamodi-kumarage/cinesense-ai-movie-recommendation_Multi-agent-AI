@@ -15,6 +15,13 @@ def get_current_user(access_token: str | None = Cookie(default=None), db: Sessio
         raise HTTPException(status_code=401, detail="User account not found.")
     return user
 
+def get_optional_user(access_token: str | None = Cookie(default=None), db: Session = Depends(get_db)) -> User | None:
+    """Return the cookie user when available, keeping public catalogue browsing anonymous."""
+    if not access_token:
+        return None
+    user_id=decode_access_token(access_token)
+    return db.get(User,user_id) if user_id else None
+
 def require_consent(user: User = Depends(get_current_user)) -> User:
     if not user.consented:
         raise HTTPException(status_code=403, detail="Please review and accept the AI/privacy notice first.")

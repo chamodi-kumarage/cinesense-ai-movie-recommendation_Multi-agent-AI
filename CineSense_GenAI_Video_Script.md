@@ -164,6 +164,104 @@ The system has six agents: Conversational Orchestrator, Guardian, Mood & Prefere
 
 ---
 
+## Detailed six-agent spotlight scenes
+
+Use these as six extra scenes after the architecture overview, or replace the short agent explanations in Scene 3 with this sequence. Together they add about 4–5 minutes. The UI does not expose every internal agent message to an ordinary viewer, so record the real app for inputs and results, then add clearly labeled explanatory overlays for the internal flow. Do not present invented trace payloads or fabricated intermediate outputs as live logs.
+
+### Agent Scene 1 — Conversational Orchestrator (about 0:45)
+
+**Purpose:** Explain how the system decides what kind of task the user asked for and coordinates the specialists.
+
+**What to show:** Start with a real chat input such as `I feel tense. Find a mystery under 120 minutes.` Add a diagram overlay: User → Guardian input check → Orchestrator → Mood/Preference → Retrieval → Guardian output check → User. Then show the actual assistant result. In a second overlay card, show the other intent branches: “compare these movies” routes to Comparison; “plan a movie night / finish by 11” routes to Scheduler. Do not imply one recommendation request invokes every agent.
+
+**Narration:** “The Conversational Orchestrator is the traffic controller for CineSense’s agent workflow. When a request arrives, it creates a trace ID, asks the Guardian to inspect the input, and classifies the request as a recommendation, comparison, or schedule. It then calls the relevant specialist with a structured agent envelope containing the sender, receiver, intent, and task payload. For a recommendation, it asks Mood and Preference Analysis to structure the request and Retrieval to find candidates. For a comparison, it routes the selected movies and criteria to Comparison and Explainability. For a viewing plan, it routes candidates and time constraints to the Scheduler. Before the response is returned, the Guardian checks the output. The Orchestrator also maintains conversation context for follow-up turns.”
+
+**Technical details to show in small text:** `ConversationalOrchestratorAgent`; `_intent()` identifies compare/schedule/recommend; `_env()` builds `AgentEnvelope`; `chat()` coordinates the agent calls; trace ID follows the workflow. Agent traces are an internal diagnostic mechanism, not proof that every internal step is visible in the UI.
+
+**GenAI video prompt:** “Create a 10-second clean software animation of a central coordinator routing three different request cards. A ‘recommend’ request branches to mood analysis and retrieval; a ‘compare’ request branches to comparison; a ‘watch plan’ request branches to scheduling. All branches return to the coordinator and pass through a shield icon before reaching the user. Show exactly one central coordinator and the named specialist roles only. No fake logs, no invented data, no unreadable text; labels will be added in post. 16:9.”
+
+**Optional technical overlay:** `Intent → AgentEnvelope → Specialist call(s) → Guardian output check`
+
+### Agent Scene 2 — Security & Responsible-AI Guardian (about 0:45)
+
+**Purpose:** Explain the Guardian’s input and output checks without presenting it as a complete security guarantee.
+
+**What to show:** Use a safe benign request in the real UI. Then show a separate mock diagram (not a live attack) in which an abstract suspicious instruction is blocked and secret-looking text is redacted. Show the Responsible AI UI for explanations, correcting mood, or flagging recommendations as user-facing controls; identify these as related product controls, not all Guardian internals.
+
+**Narration:** “The Guardian is a safety checkpoint around the agent workflow. On input, it normalizes and sanitizes text, looks for prompt-injection patterns such as requests to reveal hidden instructions or bypass safeguards, and can return a safe refusal notice when a request is flagged. On output, it applies redaction patterns for secret-like values and removes selected unsafe content before the answer is returned. Security events can be recorded for administrator review. This is a rule-based protective layer; it reduces some risks, but it is not a guarantee that every unsafe or private value will be detected. The application also gives users controls to correct a detected mood, see recommendation reasons, and flag results.”
+
+**Technical details to show in small text:** `GuardianAgent.inspect_input()` sanitizes and checks patterns; `inspect_output()` redacts matched secrets and selected unsafe markers; risk events are stored for the security dashboard. Distinguish these implemented checks from a claim of comprehensive moderation.
+
+**GenAI video prompt:** “Create a 10-second abstract security-check animation for a software explainer. A generic text card passes through a shield; a suspicious instruction card is diverted to a neutral blocked symbol; a secret-like string becomes [redacted]; a normal movie request continues. Do not display real prompt text, keys, passwords, user data, or a fake product dashboard. Calm informative tone, no hacker imagery, labels added in editing, 16:9.”
+
+**Optional technical overlay:** `Normalize → Pattern checks → Allow or safe response → Output redaction`
+
+### Agent Scene 3 — Mood & Preference Analysis (about 0:45)
+
+**Purpose:** Show how natural language becomes structured preference signals that other agents can use.
+
+**What to show:** Enter the actual synthetic request `I’m in a relaxed mood, want science fiction, no horror, and have 100 minutes.` Use an overlay to parse it into fields: mood `Relaxed`; preferred genre `Science Fiction`; disliked genre `Horror`; time `100 min`. If the UI offers a mood confirmation/correction control, show it. Avoid claiming the extraction is always correct.
+
+**Narration:** “Mood and Preference Analysis converts a sentence into a compact set of signals. CineSense looks for mood words, supported genres, negative preferences such as ‘no horror,’ and runtime expressions such as ‘100 minutes’ or ‘two hours.’ It can also extract named entities, quoted titles, and people where available. The implementation uses enhanced rules and can optionally use spaCy named-entity recognition. The result is structured data for retrieval and planning, not a psychological diagnosis. The viewer can correct a detected mood when the interface provides that option.”
+
+**Technical details to show in small text:** `MoodPreferenceAgent.analyze()` returns fields such as `mood`, `genres`, `disliked`, `time_available`, `entities`, `detected_moods`, and `nlp_backend`. Mood scoring checks known word patterns and negation; genre matching handles dislike phrases; time parsing converts hours to minutes. Optional spaCy failure falls back to rules.
+
+**GenAI visual prompt:** “Create a 9-second motion graphic showing a sample sentence transforming into four labeled chips: mood, preferred genre, excluded genre, available minutes. Add a small user-edit pencil icon beside the mood chip. Use example values only as illustrative graphics, not as a real extraction log. No faces or mental-health imagery. Clear educational motion design, 16:9.”
+
+**Optional technical overlay:** `Free text → mood + genres + dislikes + entities + minutes`
+
+### Agent Scene 4 — Retrieval & Recommendation (about 0:50)
+
+**Purpose:** Explain candidate search and ranking, including the difference between retrieval and response generation.
+
+**What to show:** Reuse the real recommendation request and actual candidate cards. Add a diagram overlay of catalogue documents represented by title, overview, genre, runtime, cast, mood, and rating. Animate lexical term matching and semantic similarity contributing to a ranked candidate list. Use actual screen result ordering, not invented score numbers.
+
+**Narration:** “Retrieval and Recommendation searches the available movie catalogue and ranks candidates against the structured request. It combines lexical matching through BM25 with semantic hash-vector similarity, then blends those signals with preference and catalogue factors. Optional Sentence Transformers can provide another semantic representation when installed. The retrieval agent can also apply constraints and produce grounded movie details and recommendation reasons. If an optional language model is configured, the system can use it to phrase a response from supplied catalogue context; otherwise a deterministic local response path remains available. Retrieval finds and orders candidates—the language model does not create catalogue facts.”
+
+**Technical details to show in small text:** Retrieval helpers tokenize text, normalize scores, compute cosine similarity for vectors, and create movie dictionaries. Candidate ranking combines text/relevance signals with mood, genre, runtime, rating, pace, and profile context according to request path. Keep precise weights off screen unless you are showing the matching code/path, because not every endpoint uses the same scoring method.
+
+**GenAI video prompt:** “Create an 11-second educational animation of a movie catalogue search. First highlight words shared with a request to represent lexical search; then show related-theme cards lighting up to represent semantic similarity; finally sort blank movie cards into a ranked list. Include catalogue attributes as simple icons for genre, runtime, rating, and mood. Leave names and numbers blank for the real screen recording. Do not fabricate titles, ratings, or scores. 16:9.”
+
+**Optional technical overlay:** `BM25 text relevance + semantic hash-vector similarity + request constraints`
+
+### Agent Scene 5 — Comparison & Explainability (about 0:50)
+
+**Purpose:** Explain the scoring dimensions, mode-specific weights, trade-offs, and grounded explanation.
+
+**What to show:** Select two or more actual movies in the Compare UI. Show one mode, then switch to another and capture the actual reordered result. Zoom into the score breakdown and explanation. If the UI exposes risk reasons, point out one actual example. Do not call a weighted suitability score an objective movie quality score.
+
+**Narration:** “Comparison and Explainability evaluates the selected candidates across mood fit, genre fit, time fit, catalogue rating, pace, and viewing-history fit. The selected mode changes the weights—for example, Best Quality gives rating more influence, while Shortest Option puts more weight on runtime fit. The agent can adjust the ranking for a new scenario and report rank changes. It also calculates potential trade-offs, such as a movie running over the available time or matching a genre the viewer dislikes. It then gives a concise verdict based on the movie facts provided. The scores are transparent decision support, not a universal measure of quality.”
+
+**Technical details to show in small text:** Mode weight table includes `best_mood`, `best_quality`, `shortest`, `most_exciting`, `safest_group`, and `different`. Criteria are normalized and combined as a weighted score; scenario adjustments can change weights/penalties; risk reasons are emitted separately. LLM explanation, when enabled, is grounded in supplied movie facts, with deterministic fallback text otherwise.
+
+**GenAI visual prompt:** “Create a 10-second clean comparison animation with three blank movie cards and six criteria icons: mood, genre, time, rating, pace, history. A mode switch changes the relative emphasis, then cards reorder. Add a separate amber trade-off marker beside one card. No fabricated percentages or movie facts; leave values blank for real screen capture. Professional, readable, 16:9.”
+
+**Optional technical overlay:** `Overall suitability = weighted criteria − scenario penalties`
+
+### Agent Scene 6 — Mood & Time Scheduler (about 0:50)
+
+**Purpose:** Explain how the scheduler makes a practical single-movie or double-feature plan and calculates finish times.
+
+**What to show:** In the real planner, set a time window and buffer, then show the actual plan. If the interface supports finish-by, use a safe example such as `finish by 10:30 PM`. Show the start time, movie finish, buffer, and remaining minutes from the real result. Include the empty-result behavior if a short runtime cannot fit, but do not force a misleading example.
+
+**Narration:** “Mood and Time Scheduler turns the candidate list into a practical watch plan. It subtracts the wind-down buffer from the available time to calculate the movie-time budget. It first looks for a strong single title that uses a useful portion of the window. If no single title is a good fit, it evaluates pairs of suitable movies and can choose a double feature that stays within budget. When a finish-by time is provided, it calculates a suggested start and planned finish. It reports unused time, and if no candidate fits, it says so rather than inventing a plan.”
+
+**Technical details to show in small text:** `MoodTimeSchedulerAgent.plan()` clamps buffer to 0–60 minutes; computes `movie_budget = free_minutes − buffer`; filters movies by runtime; evaluates candidate pairs; calculates suggested start and planned finish from `finish_by`; returns plan type, selected movies, used/remaining minutes, and message.
+
+**GenAI visual prompt:** “Create an 11-second timeline animation. Begin with an available evening window, subtract a clearly separated wind-down buffer, then fit either one movie block or two shorter movie blocks into the remaining budget. Show a finish-by marker and suggested start marker. Use blank time values for editing; no fake recommendation output. Simple clocks and film icons, dark navy, teal and amber, 16:9.”
+
+**Optional technical overlay:** `Available minutes − buffer → single or double feature → start/finish estimate`
+
+### Closing transition after the six agent scenes (about 0:15)
+
+**Narration:** “Together, these six agents turn one natural-language request into a relevant, ranked, explained, and time-aware movie experience. The Orchestrator coordinates the work, and each specialist has a focused responsibility.”
+
+**Visual:** Animate all six labeled nodes briefly, then cut to the actual CineSense result screen. Keep the Orchestrator in the center and all five specialist roles visible exactly once.
+
+**GenAI prompt:** “Create a 6-second closing architecture animation with one central Conversational Orchestrator and exactly five specialist nodes: Guardian, Mood & Preference Analysis, Retrieval & Recommendation, Comparison & Explainability, Mood & Time Scheduler. A request flows in and one movie shortlist flows out. Clean, restrained product design, labels added in post, no fake UI, no extra agents, 16:9.”
+
+---
+
 ## GenAI prompts for production
 
 ### Voice generation

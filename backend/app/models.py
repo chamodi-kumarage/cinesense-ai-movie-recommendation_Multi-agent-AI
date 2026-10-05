@@ -64,11 +64,13 @@ class Movie(Base):
     tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     poster_url: Mapped[str] = mapped_column(Text, default="")
     backdrop_url: Mapped[str] = mapped_column(Text, default="")
+    content_rating: Mapped[str] = mapped_column(String(16), default="")
 
 class ChatTurn(Base):
     __tablename__ = "chat_turns"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey("profiles.id"), nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(20))
     content_enc: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
@@ -111,6 +113,7 @@ class AgentTrace(Base):
     __tablename__ = "agent_traces"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     sender: Mapped[str] = mapped_column(String(60))
     receiver: Mapped[str] = mapped_column(String(60))
     intent: Mapped[str] = mapped_column(String(80))
@@ -121,6 +124,14 @@ class AgentTrace(Base):
 class ConversationState(Base):
     __tablename__ = "conversation_states"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    last_query_enc: Mapped[str] = mapped_column(Text, default="")
+    prefs_json: Mapped[str] = mapped_column(Text, default="{}")
+    movie_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+class ProfileConversationState(Base):
+    __tablename__ = "profile_conversation_states"
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id"), primary_key=True)
     last_query_enc: Mapped[str] = mapped_column(Text, default="")
     prefs_json: Mapped[str] = mapped_column(Text, default="{}")
     movie_ids_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -251,6 +262,45 @@ class ProfilePreference(Base):
     disliked_genres_json: Mapped[str] = mapped_column(Text, default="[]")
     preferred_moods_json: Mapped[str] = mapped_column(Text, default="[]")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+class FamilyProfileSafety(Base):
+    __tablename__ = "family_profile_safety"
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    age_group: Mapped[str] = mapped_column(String(20), default="all")
+    excluded_genres_json: Mapped[str] = mapped_column(Text, default="[]")
+    block_unrated: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+class FamilyWatchlistItem(Base):
+    __tablename__ = "family_watchlist_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    family_group_id: Mapped[int] = mapped_column(ForeignKey("family_groups.id"), index=True)
+    movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id"), index=True)
+    added_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    added_by_profile_id: Mapped[int | None] = mapped_column(ForeignKey("profiles.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="suggested", index=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class FamilyWatchlistVote(Base):
+    __tablename__ = "family_watchlist_votes"
+    __table_args__ = (UniqueConstraint("item_id", "profile_id", name="uq_family_watchlist_vote_profile"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("family_watchlist_items.id"), index=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id"), index=True)
+    vote: Mapped[str] = mapped_column(String(10), default="yes")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class FamilyNotification(Base):
+    __tablename__ = "family_notifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    family_group_id: Mapped[int] = mapped_column(ForeignKey("family_groups.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(30), default="reminder")
+    message: Mapped[str] = mapped_column(String(500))
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class GroupSession(Base):
     __tablename__ = "group_sessions"

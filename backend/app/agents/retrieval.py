@@ -40,6 +40,7 @@ def movie_dict(m: Movie) -> dict:
         "tmdb_id": m.tmdb_id,
         "poster_url": m.poster_url,
         "backdrop_url": m.backdrop_url,
+        "content_rating": m.content_rating,
         "source": "tmdb" if m.tmdb_id else "curated",
     }
 

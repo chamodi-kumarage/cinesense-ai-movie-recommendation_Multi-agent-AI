@@ -1,4 +1,4 @@
-import json, re, secrets, httpx
+import asyncio, json, re, secrets, httpx
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -21,6 +21,7 @@ class MovieUpdate(BaseModel):
     language:str|None=Field(None,max_length=50); studio:str|None=Field(None,max_length=120)
     director:str|None=Field(None,max_length=120); cast:list[str]|None=None; moods:list[str]|None=None
     pace:str|None=Field(None,max_length=30); keywords:list[str]|None=None
+    content_rating:str|None=Field(None,max_length=16)
     trailer_youtube_url:str|None=Field(None,max_length=500); featured:bool|None=None
 
 
@@ -64,7 +65,7 @@ def movies(q:str='',limit:int=80,db:Session=Depends(get_db),admin=Depends(requir
 def update_movie(movie_id:int,data:MovieUpdate,db:Session=Depends(get_db),admin=Depends(require_admin)):
     m=db.get(Movie,movie_id)
     if not m: raise HTTPException(404,'Movie not found.')
-    scalar=['title','year','runtime','overview','rating','language','studio','director','pace']
+    scalar=['title','year','runtime','overview','rating','language','studio','director','pace','content_rating']
     for field in scalar:
         value=getattr(data,field)
         if value is not None:setattr(m,field,value)
@@ -115,6 +116,56 @@ async def import_popular(pages:int=3,db:Session=Depends(get_db),admin=Depends(re
                 if await _import_tmdb_movie(db,client,int(tid)):added+=1
     db.add(SecurityEvent(user_id=admin.id,category='catalogue_sync',severity='info',detail_safe=f'tmdb_popular_added:{added}'));db.commit()
     return {'ok':True,'added':added,'total':db.query(Movie).count()}
+
+@router.post('/catalogue/sync-tmdb-images')
+async def sync_tmdb_images(limit:int=Query(360,ge=1,le=360),db:Session=Depends(get_db),admin=Depends(require_admin)):
+    """Fetch missing poster/backdrop paths for existing TMDB-linked catalogue movies."""
+    if not settings.tmdb_api_key:
+        raise HTTPException(400,'TMDB_API_KEY is not configured. Add it to backend/.env first.')
+    movies=(db.query(Movie).filter(Movie.tmdb_id.is_not(None)).filter(
+        (Movie.poster_url.is_(None)) | (Movie.poster_url=='') |
+        (Movie.backdrop_url.is_(None)) | (Movie.backdrop_url=='') |
+        (Movie.content_rating.is_(None)) | (Movie.content_rating=='')
+    ).order_by(Movie.rating.desc()).limit(limit).all())
+    semaphore=asyncio.Semaphore(6)
+
+    async def fetch_artwork(client,movie):
+        async with semaphore:
+            try:
+                response=await client.get(
+                    f'https://api.themoviedb.org/3/movie/{movie.tmdb_id}',
+                    params={'api_key':settings.tmdb_api_key,'language':'en-US','append_to_response':'release_dates'},
+                )
+                if response.status_code!=200:
+                    return movie.id,None,None
+                data=response.json()
+                releases=(data.get('release_dates') or {}).get('results') or []
+                us=next((row for row in releases if row.get('iso_3166_1')=='US'),None)
+                dates=(us or {}).get('release_dates') or []
+                certification=next((str(item.get('certification') or '').strip().upper() for item in dates if item.get('certification')),'')
+                return movie.id,data.get('poster_path'),data.get('backdrop_path'),certification
+            except Exception:
+                return movie.id,None,None,''
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        results=await asyncio.gather(*(fetch_artwork(client,movie) for movie in movies))
+    by_id={movie.id:movie for movie in movies}
+    posters_updated=0;backdrops_updated=0
+    ratings_updated=0
+    for movie_id,poster_path,backdrop_path,certification in results:
+        movie=by_id[movie_id]
+        if poster_path and not movie.poster_url:
+            movie.poster_url='https://image.tmdb.org/t/p/w500'+poster_path
+            posters_updated+=1
+        if backdrop_path and not movie.backdrop_url:
+            movie.backdrop_url='https://image.tmdb.org/t/p/original'+backdrop_path
+            backdrops_updated+=1
+        if certification and not movie.content_rating:
+            movie.content_rating=certification
+            ratings_updated+=1
+    db.add(SecurityEvent(user_id=admin.id,category='catalogue_sync',severity='info',detail_safe=f'tmdb_images:checked={len(movies)}:posters={posters_updated}:backdrops={backdrops_updated}'))
+    db.commit()
+    return {'ok':True,'checked':len(movies),'posters_updated':posters_updated,'backdrops_updated':backdrops_updated,'ratings_updated':ratings_updated}
 
 @router.get('/hero')
 def hero(db:Session=Depends(get_db),admin=Depends(require_admin)):

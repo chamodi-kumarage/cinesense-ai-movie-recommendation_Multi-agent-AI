@@ -1,9 +1,63 @@
 import json
 from collections import Counter
 from sqlalchemy.orm import Session
-from ..models import Movie, Profile, ProfilePreference, ProfileWatchEvent
+from ..models import Movie, Profile, ProfilePreference, ProfileWatchEvent, FamilyProfileSafety
 from ..security import decrypt_text
 from ..agents.retrieval import parse_csvish
+
+RATING_LEVELS = {"G": 0, "TV-Y": 0, "TV-G": 0, "PG": 1, "TV-PG": 1, "PG-13": 2, "TV-14": 2, "R": 3, "TV-MA": 3, "NC-17": 4, "X": 4}
+AGE_MAX_RATING = {"all": None, "under13": "PG", "teen": "PG-13", "adult": "NC-17"}
+
+
+def safety_row(db: Session, user_id: int, profile_id: int, create: bool = False):
+    row = db.get(FamilyProfileSafety, profile_id)
+    if row and row.user_id != user_id:
+        raise ValueError("Profile safety ownership mismatch.")
+    if not row and create:
+        row = FamilyProfileSafety(profile_id=profile_id, user_id=user_id)
+        db.add(row)
+        db.flush()
+    return row
+
+
+def safety_payload(db: Session, user_id: int, profile_id: int) -> dict:
+    row = safety_row(db, user_id, profile_id)
+    if not row:
+        return {"age_group": "all", "excluded_genres": [], "block_unrated": True}
+    try:
+        excluded = json.loads(row.excluded_genres_json or "[]")
+    except Exception:
+        excluded = []
+    return {"age_group": row.age_group, "excluded_genres": excluded, "block_unrated": row.block_unrated}
+
+
+def set_safety_settings(db: Session, user_id: int, profile_id: int, *, age_group=None, excluded_genres=None, block_unrated=None):
+    row = safety_row(db, user_id, profile_id, create=True)
+    if age_group is not None: row.age_group = age_group
+    if excluded_genres is not None: row.excluded_genres_json = json.dumps(sorted(set(excluded_genres)))
+    if block_unrated is not None: row.block_unrated = block_unrated
+    return row
+
+
+def movie_allowed_for_profiles(movie: Movie, profiles: list[Profile], db: Session) -> bool:
+    genres = {g.casefold() for g in parse_csvish(movie.genres)}
+    movie_rating = (movie.content_rating or "").upper().strip()
+    movie_level = RATING_LEVELS.get(movie_rating)
+    for profile in profiles:
+        setting = safety_row(db, profile.user_id, profile.id)
+        if not setting:
+            continue
+        try: excluded = {str(x).casefold() for x in json.loads(setting.excluded_genres_json or "[]")}
+        except Exception: excluded = set()
+        if genres & excluded:
+            return False
+        maximum = AGE_MAX_RATING.get(setting.age_group)
+        if maximum:
+            if movie_level is None and setting.block_unrated:
+                return False
+            if movie_level is not None and movie_level > RATING_LEVELS[maximum]:
+                return False
+    return True
 
 
 def _json_list(value: str) -> list[str]:

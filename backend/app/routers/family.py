@@ -9,18 +9,22 @@ from ..dependencies import get_current_user
 from ..models import (
     Profile, ActiveProfile, ProfileWatchEvent, ProfilePreference, Movie,
     GroupSession, GroupVote, PlannerActivity, User, FamilyGroup, FamilyMember, FamilyInvite,
+    FamilyProfileSafety, FamilyWatchlistItem, FamilyWatchlistVote, FamilyNotification,
+    CalendarBusySlot,
 )
 from ..schemas import (
     ProfileCreateRequest, ProfileUpdateRequest, ProfileSwitchRequest,
     GroupChoiceRequest, GroupCompareRequest, GroupVoteRequest, FamilyInviteCreateRequest,
-    FamilyInviteAcceptRequest, FamilyMemberRoleRequest,
+    FamilyInviteAcceptRequest, FamilyMemberRoleRequest, FamilyMemberSafetyRequest, FamilyWatchlistAddRequest,
+    FamilyWatchlistVoteRequest, FamilyMovieNightRequest, FamilyWatchlistStatusRequest,
 )
 from ..security import encrypt_text, decrypt_text
 from ..services.profiles import ensure_default_profile, active_profile_id
 from ..services.family_logic import (
     preference_payload, set_preferences, profile_learning_snapshot, consensus_for_movie,
+    safety_payload, set_safety_settings, movie_allowed_for_profiles,
 )
-from ..agents.retrieval import movie_dict
+from ..agents.retrieval import movie_dict, parse_csvish
 from ..agents.orchestrator import orchestrator
 from ..protocol import AgentEnvelope
 
@@ -63,7 +67,7 @@ def require_owner(db: Session, user):
 def member_payload(db: Session, member: FamilyMember):
     account = db.get(User, member.user_id)
     profile = ensure_default_profile(db, account) if account else None
-    return {"id": member.id, "user_id": member.user_id, "email": account.email if account else "", "display_name": decrypt_text(account.display_name_enc) if account else "", "profile_id": profile.id if profile else None, "role": member.role, "status": member.status, "is_owner": member.role == "owner", "participant_type": "account", "created_at": member.created_at}
+    return {"id": member.id, "user_id": member.user_id, "email": account.email if account else "", "display_name": decrypt_text(account.display_name_enc) if account else "", "profile_id": profile.id if profile else None, "safety": safety_payload(db,account.id,profile.id) if account and profile else None, "role": member.role, "status": member.status, "is_owner": member.role == "owner", "participant_type": "account", "created_at": member.created_at}
 
 def family_owner_id(db: Session, user) -> int:
     group, _ = family_access(db, user)
@@ -114,7 +118,9 @@ def create_family_invite(data: FamilyInviteCreateRequest, db: Session = Depends(
     target = db.query(User).filter(User.email == email).first()
     active_count = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").count()
     pending_count = db.query(FamilyInvite).filter(FamilyInvite.family_group_id == group.id, FamilyInvite.status == "pending", FamilyInvite.expires_at > now_utc()).count()
-    if active_count + pending_count >= MAX_FAMILY_PEOPLE:
+    account_profiles=[ensure_default_profile(db,db.get(User,m.user_id)).id for m in db.query(FamilyMember).filter(FamilyMember.family_group_id==group.id,FamilyMember.status=="active").all() if db.get(User,m.user_id)]
+    managed_count=db.query(Profile).filter(Profile.user_id==group.owner_user_id,~Profile.id.in_(account_profiles or [-1])).count()
+    if active_count + pending_count + managed_count >= MAX_FAMILY_PEOPLE:
         raise HTTPException(409, "Family plan supports a maximum of five people, including pending invitations.")
     if target and active_membership(db, target.id):
         raise HTTPException(409, "That user already belongs to a family household.")
@@ -144,6 +150,9 @@ def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(
     if active_count >= MAX_FAMILY_PEOPLE:
         raise HTTPException(409, "This family household is already full.")
     db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role=invite.role, status="active"))
+    if invite.role=="child":
+        profile=ensure_default_profile(db,user)
+        set_safety_settings(db,user.id,profile.id,age_group="under13",excluded_genres=["Horror"],block_unrated=True)
     invite.status = "accepted"; db.commit()
     return {"ok": True, "message": "You joined the CineSense family household.", "group_id": invite.family_group_id}
 
@@ -153,8 +162,28 @@ def update_member_role(member_id: int, data: FamilyMemberRoleRequest, db: Sessio
     member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.family_group_id == group.id, FamilyMember.status == "active").first()
     if not member: raise HTTPException(404, "Family member not found.")
     if member.role == "owner": raise HTTPException(409, "The owner role cannot be changed here.")
-    member.role = data.role; db.commit(); db.refresh(member)
+    member.role = data.role
+    account=db.get(User,member.user_id)
+    if account:
+        profile=ensure_default_profile(db,account)
+        current=safety_payload(db,account.id,profile.id)
+        set_safety_settings(db,account.id,profile.id,age_group="under13" if data.role=="child" else "all",
+            excluded_genres=current["excluded_genres"] or (["Horror"] if data.role=="child" else []),
+            block_unrated=True if data.role=="child" else current["block_unrated"])
+    db.commit(); db.refresh(member)
     return member_payload(db, member)
+
+@router.put("/members/{member_id}/safety")
+def update_member_safety(member_id: int, data: FamilyMemberSafetyRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group=require_owner(db,user)
+    member=db.query(FamilyMember).filter(FamilyMember.id==member_id,FamilyMember.family_group_id==group.id,FamilyMember.status=="active",FamilyMember.role=="child").first()
+    if not member: raise HTTPException(404,"Child family member not found.")
+    account=db.get(User,member.user_id)
+    profile=ensure_default_profile(db,account)
+    set_safety_settings(db,account.id,profile.id,age_group=data.age_group,
+        excluded_genres=data.excluded_genres,block_unrated=data.block_unrated)
+    db.commit()
+    return {"ok":True,"safety":safety_payload(db,account.id,profile.id)}
 
 @router.delete("/members/{member_id}")
 def remove_household_member(member_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
@@ -162,6 +191,11 @@ def remove_household_member(member_id: int, db: Session = Depends(get_db), user=
     member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.family_group_id == group.id, FamilyMember.status == "active").first()
     if not member: raise HTTPException(404, "Family member not found.")
     if member.role == "owner": raise HTTPException(409, "The Family owner cannot remove themselves.")
+    account=db.get(User,member.user_id)
+    if account:
+        profile=ensure_default_profile(db,account)
+        db.query(FamilyWatchlistVote).filter(FamilyWatchlistVote.profile_id==profile.id).delete(synchronize_session=False)
+        db.query(GroupVote).filter(GroupVote.profile_id==profile.id).delete(synchronize_session=False)
     member.status = "removed"; db.commit()
     return {"ok": True, "message": "Family member removed."}
 
@@ -187,6 +221,7 @@ def rich_profile_payload(db: Session, user, profile: Profile, active_id: int | N
         "display_name": decrypt_text(profile.name_enc),
         "active": profile.id == active_id,
         "preferences": prefs,
+        "safety": safety_payload(db, profile.user_id, profile.id),
         "history_count": history_count,
         "created_at": profile.created_at,
     }
@@ -221,11 +256,15 @@ def list_profiles(db: Session = Depends(get_db), user=Depends(get_current_user))
 
 @router.post("/profiles")
 def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    require_owner(db, user)
+    group=require_owner(db, user)
     ensure_default_profile(db, user)
     rows = db.query(Profile).filter(Profile.user_id == user.id).all()
-    if len(rows) >= 5:
-        raise HTTPException(409, "Family plan supports a maximum of five profiles.")
+    active_count=db.query(FamilyMember).filter(FamilyMember.family_group_id==group.id,FamilyMember.status=="active").count()
+    pending_count=db.query(FamilyInvite).filter(FamilyInvite.family_group_id==group.id,FamilyInvite.status=="pending",FamilyInvite.expires_at>now_utc()).count()
+    account_profiles=[ensure_default_profile(db,db.get(User,m.user_id)).id for m in db.query(FamilyMember).filter(FamilyMember.family_group_id==group.id,FamilyMember.status=="active").all() if db.get(User,m.user_id)]
+    managed_count=db.query(Profile).filter(Profile.user_id==group.owner_user_id,~Profile.id.in_(account_profiles or [-1])).count()
+    if active_count + pending_count + managed_count >= MAX_FAMILY_PEOPLE:
+        raise HTTPException(409, "Family plan supports five people total, including managed child and guest profiles.")
     normalized = data.name.strip().casefold()
     if any(decrypt_text(p.name_enc).strip().casefold() == normalized for p in rows):
         raise HTTPException(409, "A profile with that display name already exists.")
@@ -237,6 +276,8 @@ def create_profile(data: ProfileCreateRequest, db: Session = Depends(get_db), us
         disliked_genres=data.disliked_genres,
         preferred_moods=data.preferred_moods,
     )
+    set_safety_settings(db, user.id, profile.id, age_group=data.age_group,
+                        excluded_genres=data.excluded_genres, block_unrated=data.block_unrated)
     db.commit(); db.refresh(profile)
     return rich_profile_payload(db, user, profile, active_profile_id(db, user))
 
@@ -257,6 +298,8 @@ def update_profile(profile_id: int, data: ProfileUpdateRequest, db: Session = De
         disliked_genres=data.disliked_genres,
         preferred_moods=data.preferred_moods,
     )
+    set_safety_settings(db, user.id, profile.id, age_group=data.age_group,
+                        excluded_genres=data.excluded_genres, block_unrated=data.block_unrated)
     db.commit(); db.refresh(profile)
     return rich_profile_payload(db, user, profile, active_profile_id(db, user))
 
@@ -275,8 +318,11 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(
         db.flush()
     # Sessions remain as audit history, but votes/preferences/history owned by this profile are removed.
     db.query(GroupVote).filter(GroupVote.profile_id == profile_id).delete(synchronize_session=False)
+    db.query(FamilyWatchlistVote).filter(FamilyWatchlistVote.profile_id == profile_id).delete(synchronize_session=False)
+    db.query(FamilyWatchlistItem).filter(FamilyWatchlistItem.added_by_profile_id == profile_id).update({FamilyWatchlistItem.added_by_profile_id: None}, synchronize_session=False)
     db.query(ProfileWatchEvent).filter(ProfileWatchEvent.profile_id == profile_id, ProfileWatchEvent.user_id == user.id).delete(synchronize_session=False)
     db.query(ProfilePreference).filter(ProfilePreference.profile_id == profile_id, ProfilePreference.user_id == user.id).delete(synchronize_session=False)
+    db.query(FamilyProfileSafety).filter(FamilyProfileSafety.profile_id == profile_id, FamilyProfileSafety.user_id == user.id).delete(synchronize_session=False)
     db.query(PlannerActivity).filter(PlannerActivity.profile_id == profile_id, PlannerActivity.user_id == user.id).update({PlannerActivity.profile_id: None}, synchronize_session=False)
     db.delete(profile); db.commit()
     return {"ok": True, "active_profile_id": active_profile_id(db, user)}
@@ -366,7 +412,8 @@ def run_group_recommendation(db: Session, user, row: GroupSession):
     query = (row.request_text or "family group movie") + " " + " ".join(genres) + " " + (mood or "")
     trace_id = str(uuid.uuid4())
     env = AgentEnvelope(trace_id=trace_id, sender="orchestrator", receiver="retrieval", intent="family_group_recommend", payload={"session_id": row.id, "profile_ids": profile_ids, "preferences": prefs})
-    candidates = orchestrator.retrieval.retrieve(db, env, query.strip(), prefs, 0, limit=24)
+    candidates = orchestrator.retrieval.retrieve(db, env, query.strip(), prefs, 0, limit=120)
+    candidates = [item for item in candidates if (movie := db.get(Movie, item["id"])) and movie_allowed_for_profiles(movie, profiles, db)]
 
     scored = []
     score_map = {}
@@ -385,6 +432,9 @@ def run_group_recommendation(db: Session, user, row: GroupSession):
     scored.sort(key=lambda x: (x["group_score"], x.get("rating", 0)), reverse=True)
     row.candidate_scores_json = json.dumps(score_map)
     row.status = "recommended"
+    family=db.query(FamilyGroup).filter(FamilyGroup.owner_user_id==row.family_id).first()
+    if family:
+        db.add(FamilyNotification(family_group_id=family.id,kind="group_vote",message="A new family movie-choice vote is open."))
     db.commit()
     return {
         "trace_id": trace_id,
@@ -480,6 +530,8 @@ def group_vote(session_id: str, data: GroupVoteRequest, db: Session = Depends(ge
     else:
         db.add(GroupVote(session_id=row.id, profile_id=data.profile_id, movie_id=data.movie_id))
     row.status = "voting"
+    group,_=family_access(db,user)
+    db.add(FamilyNotification(family_group_id=group.id,kind="vote",message="A family member voted in a movie-choice session."))
     db.commit()
     return final_selection_payload(db, row)
 
@@ -527,3 +579,192 @@ def group_result(session_id: str, db: Session = Depends(get_db), user=Depends(ge
     require_family(user, db)
     row = session_or_404(db, user, session_id)
     return final_selection_payload(db, row)
+
+
+def _family_watchlist_payload(db: Session, user, row: FamilyWatchlistItem):
+    movie=db.get(Movie,row.movie_id)
+    votes=db.query(FamilyWatchlistVote).filter(FamilyWatchlistVote.item_id==row.id).all()
+    profile_id=active_profile_id(db,user)
+    own=next((v.vote for v in votes if v.profile_id==profile_id),None)
+    adder=db.get(Profile,row.added_by_profile_id) if row.added_by_profile_id else None
+    return {
+        "id":row.id,"movie":movie_dict(movie) if movie else None,"status":row.status,
+        "added_by":decrypt_text(adder.name_enc) if adder else "Family member",
+        "scheduled_for":row.scheduled_for,"created_at":row.created_at,
+        "yes_votes":sum(v.vote=="yes" for v in votes),"no_votes":sum(v.vote=="no" for v in votes),
+        "my_vote":own,
+    }
+
+
+@router.get("/watchlist")
+def family_watchlist(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,_=family_access(db,user)
+    rows=(db.query(FamilyWatchlistItem).filter(
+        FamilyWatchlistItem.family_group_id==group.id,FamilyWatchlistItem.status!="removed"
+    ).order_by(FamilyWatchlistItem.created_at.desc()).limit(100).all())
+    viewer=db.get(Profile,active_profile_id(db,user))
+    return [_family_watchlist_payload(db,user,row) for row in rows
+            if (movie:=db.get(Movie,row.movie_id)) and (not viewer or movie_allowed_for_profiles(movie,[viewer],db))]
+
+
+@router.post("/watchlist")
+def add_family_watchlist_item(data: FamilyWatchlistAddRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,_=family_access(db,user)
+    movie=db.get(Movie,data.movie_id)
+    if not movie: raise HTTPException(404,"Movie not found.")
+    profile_id=active_profile_id(db,user)
+    viewer=db.get(Profile,profile_id)
+    if viewer and not movie_allowed_for_profiles(movie,[viewer],db):
+        raise HTTPException(403,"This movie is hidden by the active profile's content filters.")
+    existing=db.query(FamilyWatchlistItem).filter(
+        FamilyWatchlistItem.family_group_id==group.id,FamilyWatchlistItem.movie_id==movie.id,
+        FamilyWatchlistItem.status!="removed"
+    ).first()
+    if existing:
+        return _family_watchlist_payload(db,user,existing)
+    item=FamilyWatchlistItem(family_group_id=group.id,movie_id=movie.id,added_by_user_id=user.id,
+        added_by_profile_id=profile_id,status="planned" if data.scheduled_for else "suggested",scheduled_for=data.scheduled_for)
+    db.add(item);db.flush()
+    db.add(FamilyWatchlistVote(item_id=item.id,profile_id=profile_id,vote="yes"))
+    notice=FamilyNotification(family_group_id=group.id,kind="watchlist",message=f"{movie.title} was added to the family watchlist.",scheduled_for=data.scheduled_for)
+    db.add(notice);db.commit();db.refresh(item)
+    return _family_watchlist_payload(db,user,item)
+
+
+@router.post("/watchlist/{item_id}/vote")
+def vote_family_watchlist(item_id: int, data: FamilyWatchlistVoteRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,membership=family_access(db,user)
+    item=db.query(FamilyWatchlistItem).filter(FamilyWatchlistItem.id==item_id,FamilyWatchlistItem.family_group_id==group.id,FamilyWatchlistItem.status!="removed").first()
+    if not item: raise HTTPException(404,"Watchlist item not found.")
+    allowed={p.id:p for p in allowed_family_profiles(db,user)}
+    profile=allowed.get(data.profile_id)
+    if not profile: raise HTTPException(403,"That profile is not part of this Family household.")
+    if membership.role!="owner" and profile.user_id!=user.id:
+        raise HTTPException(403,"Family members can vote only as their own account profile.")
+    vote=db.query(FamilyWatchlistVote).filter(FamilyWatchlistVote.item_id==item.id,FamilyWatchlistVote.profile_id==profile.id).first()
+    if vote: vote.vote=data.vote
+    else: db.add(FamilyWatchlistVote(item_id=item.id,profile_id=profile.id,vote=data.vote))
+    movie=db.get(Movie,item.movie_id)
+    db.add(FamilyNotification(family_group_id=group.id,kind="vote",message=f"A family member voted {data.vote} for {movie.title if movie else 'a watchlist movie'}."))
+    db.commit()
+    return _family_watchlist_payload(db,user,item)
+
+
+@router.patch("/watchlist/{item_id}/status")
+def update_family_watchlist_status(item_id: int, data: FamilyWatchlistStatusRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,_=family_access(db,user)
+    item=db.query(FamilyWatchlistItem).filter(FamilyWatchlistItem.id==item_id,FamilyWatchlistItem.family_group_id==group.id).first()
+    if not item: raise HTTPException(404,"Watchlist item not found.")
+    movie=db.get(Movie,item.movie_id);viewer=db.get(Profile,active_profile_id(db,user))
+    if movie and viewer and not movie_allowed_for_profiles(movie,[viewer],db):raise HTTPException(404,"Watchlist item not found.")
+    item.status=data.status
+    if data.status=="planned":
+        item.scheduled_for=item.scheduled_for or now_utc()
+    if data.status=="watched":
+        profile_id=active_profile_id(db,user)
+        already=False
+        for event in db.query(ProfileWatchEvent).filter(ProfileWatchEvent.profile_id==profile_id,ProfileWatchEvent.watched==True).order_by(ProfileWatchEvent.created_at.desc()).limit(100).all():
+            try:
+                if int(decrypt_text(event.movie_id_enc))==item.movie_id:
+                    already=True;break
+            except Exception:
+                continue
+        if not already:
+            db.add(ProfileWatchEvent(user_id=user.id,profile_id=profile_id,movie_id_enc=encrypt_text(str(item.movie_id)),watched=True))
+    db.commit()
+    return _family_watchlist_payload(db,user,item)
+
+
+@router.get("/notifications")
+def family_notifications(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,_=family_access(db,user)
+    rows=(db.query(FamilyNotification).filter(FamilyNotification.family_group_id==group.id)
+          .order_by(FamilyNotification.created_at.desc()).limit(40).all())
+    return [{"id":row.id,"kind":row.kind,"message":row.message,"scheduled_for":row.scheduled_for,
+             "read":row.read_at is not None,"created_at":row.created_at} for row in rows]
+
+
+@router.post("/notifications/{notification_id}/read")
+def read_family_notification(notification_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    group,_=family_access(db,user)
+    row=db.query(FamilyNotification).filter(FamilyNotification.id==notification_id,FamilyNotification.family_group_id==group.id).first()
+    if not row: raise HTTPException(404,"Family notification not found.")
+    row.read_at=now_utc();db.commit()
+    return {"ok":True,"id":row.id,"read":True}
+
+
+@router.get("/activity-summary")
+def family_activity_summary(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    family_access(db,user)
+    profiles=allowed_family_profiles(db,user)
+    profile_ids=[profile.id for profile in profiles]
+    events=(db.query(ProfileWatchEvent).filter(ProfileWatchEvent.profile_id.in_(profile_ids),ProfileWatchEvent.watched==True).all()) if profile_ids else []
+    genres=Counter();watched_minutes=0;unique_movies=set()
+    for event in events:
+        try: movie=db.get(Movie,int(decrypt_text(event.movie_id_enc)))
+        except Exception: movie=None
+        if not movie: continue
+        unique_movies.add(movie.id);watched_minutes+=max(0,int(movie.runtime or 0))
+        for genre in parse_csvish(movie.genres): genres[genre]+=1
+    return {"profile_count":len(profiles),"watched_events":len(events),"unique_movies":len(unique_movies),
+            "total_watch_minutes":watched_minutes,"top_genres":[{"genre":name,"count":count} for name,count in genres.most_common(5)]}
+
+
+@router.post("/movie-night/plan")
+def family_movie_night_plan(data: FamilyMovieNightRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    require_family(user,db)
+    # Use the existing group consensus and vote session as the source of eligible candidates.
+    group=group_choice(GroupChoiceRequest(profile_ids=data.profile_ids,free_minutes=data.free_minutes,
+        mood=data.mood,request_text=data.request_text),db,user)
+    candidates=group.get("results") or []
+    trace_id=str(uuid.uuid4())
+    finish_by=data.finish_by
+    plan=orchestrator.scheduler.plan(db,AgentEnvelope(trace_id=trace_id,sender="orchestrator",receiver="scheduler",
+        intent="family_movie_night",payload={"candidate_count":len(candidates),"free_minutes":data.free_minutes,
+        "buffer_minutes":data.buffer_minutes,"finish_by":finish_by}),candidates,data.free_minutes,finish_by,data.buffer_minutes)
+    group_row=session_or_404(db,user,group["session_id"])
+    profile_ids=json.loads(group_row.selected_profile_ids_json or "[]")
+    group_id=family_owner_id(db,user)
+    scheduled_for=data.scheduled_for
+    if scheduled_for and scheduled_for.tzinfo is None:
+        scheduled_for=scheduled_for.replace(tzinfo=timezone.utc)
+    availability_note=""
+    if scheduled_for and plan.get("movies"):
+        participants=validate_profile_ids(db,user,profile_ids)
+        participant_user_ids=list({profile.user_id for profile in participants})
+        duration=max(15,int(plan.get("used_minutes",0))+int(data.buffer_minutes or 0))
+        requested=scheduled_for
+        available=None
+        for offset in range(0,241,15):
+            candidate=requested+timedelta(minutes=offset)
+            conflict=db.query(CalendarBusySlot.id).filter(
+                CalendarBusySlot.user_id.in_(participant_user_ids),
+                CalendarBusySlot.start_at<candidate+timedelta(minutes=duration),
+                CalendarBusySlot.end_at>candidate,
+            ).first()
+            if not conflict:
+                available=candidate;break
+        scheduled_for=available
+        if available and available>requested:
+            availability_note=f"The requested slot overlaps a household busy time; the next shared opening is {available.strftime('%H:%M UTC')}."
+        elif not available:
+            availability_note="No shared calendar opening was found within four hours of the requested time. The plan is saved without a scheduled start."
+    titles=[]
+    for item in plan.get("movies",[]):
+        movie=db.get(Movie,item["id"])
+        if not movie: continue
+        titles.append(movie.title)
+        existing=db.query(FamilyWatchlistItem).filter(FamilyWatchlistItem.family_group_id==group_id,
+            FamilyWatchlistItem.movie_id==movie.id,FamilyWatchlistItem.status!="removed").first()
+        if existing:
+            existing.status="planned";existing.scheduled_for=scheduled_for
+        else:
+            db.add(FamilyWatchlistItem(family_group_id=group_id,movie_id=movie.id,added_by_user_id=user.id,
+                added_by_profile_id=active_profile_id(db,user),status="planned",scheduled_for=scheduled_for))
+    when=f" for {scheduled_for.strftime('%a %d %b at %H:%M UTC')}" if scheduled_for else ""
+    title_text=" + ".join(titles) if titles else "a family movie night"
+    db.add(FamilyNotification(family_group_id=group_id,kind="movie_night",
+        message=f"Family movie night planned{when}: {title_text}."+(f" {availability_note}" if availability_note else ""),scheduled_for=scheduled_for))
+    db.commit()
+    return {"session_id":group["session_id"],"members":group["members"],"recommendations":candidates[:8],"plan":plan,
+            "scheduled_for":scheduled_for,"availability_note":availability_note,"watchlist":family_watchlist(db,user)}

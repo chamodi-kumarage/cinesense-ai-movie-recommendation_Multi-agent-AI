@@ -3,12 +3,29 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 from .db import Base,engine,SessionLocal
 from .config import get_settings
 from .services.seed import seed_movies,seed_demo_user,seed_admin_user
-from .models import MonitoringEvent
+from .models import MonitoringEvent, User, Profile, ActiveProfile, ChatTurn, ConversationState, ProfileConversationState, AgentTrace
+from .services.profiles import ensure_default_profile
 from .routers import auth,movies,ai,audit,family,commerce,planner,admin,security_assessment,similarity
 settings=get_settings()
+
+def ensure_family_schema():
+    """Additive compatibility migration for existing SQLite/PostgreSQL installs."""
+    with engine.begin() as connection:
+        columns={column["name"] for column in inspect(engine).get_columns("movies")}
+        if "content_rating" not in columns:
+            connection.execute(text("ALTER TABLE movies ADD COLUMN content_rating VARCHAR(16) NOT NULL DEFAULT ''"))
+        columns={column["name"] for column in inspect(engine).get_columns("chat_turns")}
+        if "profile_id" not in columns:
+            connection.execute(text("ALTER TABLE chat_turns ADD COLUMN profile_id INTEGER NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_turns_profile_id ON chat_turns (profile_id)"))
+        columns={column["name"] for column in inspect(engine).get_columns("agent_traces")}
+        if "user_id" not in columns:
+            connection.execute(text("ALTER TABLE agent_traces ADD COLUMN user_id INTEGER NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_traces_user_id ON agent_traces (user_id)"))
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -18,8 +35,27 @@ async def lifespan(app:FastAPI):
         if settings.admin_password=="CineSenseAdmin!2026":
             raise RuntimeError("ADMIN_PASSWORD must be changed before production deployment.")
     Base.metadata.create_all(bind=engine)
+    ensure_family_schema()
     db=SessionLocal()
-    try:seed_movies(db);seed_demo_user(db);seed_admin_user(db)
+    try:
+        seed_movies(db);seed_demo_user(db);seed_admin_user(db)
+        for account in db.query(User).all():
+            default_profile=ensure_default_profile(db,account)
+            active=db.get(ActiveProfile,account.id)
+            profile_id=active.profile_id if active else default_profile.id
+            # Existing unscoped turns cannot be attributed to an old profile with certainty.
+            # Assign them to the account's currently active profile; future turns are profile-scoped.
+            db.query(ChatTurn).filter(ChatTurn.user_id==account.id,ChatTurn.profile_id.is_(None)).update(
+                {ChatTurn.profile_id:profile_id},synchronize_session=False)
+            legacy=db.get(ConversationState,account.id)
+            if legacy:
+                scoped=db.get(ProfileConversationState,profile_id)
+                if not scoped:
+                    scoped=ProfileConversationState(profile_id=profile_id,last_query_enc=legacy.last_query_enc,
+                        prefs_json=legacy.prefs_json,movie_ids_json=legacy.movie_ids_json)
+                    db.add(scoped)
+                db.delete(legacy)
+        db.commit()
     finally:db.close()
     yield
 
@@ -38,7 +74,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(auth.router);app.include_router(movies.router);app.include_router(ai.router);app.include_router(audit.router);app.include_router(family.router);app.include_router(commerce.router);app.include_router(planner.router);app.include_router(admin.router);app.include_router(security_assessment.router);app.include_router(similarity.router)
+app.include_router(auth.router);app.include_router(auth.account_router);app.include_router(movies.router);app.include_router(ai.router);app.include_router(audit.router);app.include_router(family.router);app.include_router(commerce.router);app.include_router(planner.router);app.include_router(admin.router);app.include_router(security_assessment.router);app.include_router(similarity.router)
 from pathlib import Path
 UPLOAD_DIR=Path(__file__).resolve().parents[1]/"uploads"
 UPLOAD_DIR.mkdir(parents=True,exist_ok=True)

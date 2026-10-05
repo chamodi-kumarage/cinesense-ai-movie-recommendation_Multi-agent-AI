@@ -1,4 +1,5 @@
 from typing import Any
+from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 class RegisterRequest(BaseModel):
@@ -121,12 +122,18 @@ class ProfileCreateRequest(BaseModel):
     preferred_genres: list[str] = Field(default_factory=list, max_length=8)
     disliked_genres: list[str] = Field(default_factory=list, max_length=8)
     preferred_moods: list[str] = Field(default_factory=list, max_length=6)
+    age_group: str = Field(default="all", pattern="^(all|under13|teen|adult)$")
+    excluded_genres: list[str] = Field(default_factory=list, max_length=12)
+    block_unrated: bool = True
 
 class ProfileUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=50)
     preferred_genres: list[str] | None = Field(default=None, max_length=8)
     disliked_genres: list[str] | None = Field(default=None, max_length=8)
     preferred_moods: list[str] | None = Field(default=None, max_length=6)
+    age_group: str | None = Field(default=None, pattern="^(all|under13|teen|adult)$")
+    excluded_genres: list[str] | None = Field(default=None, max_length=12)
+    block_unrated: bool | None = None
 
 class ProfileSwitchRequest(BaseModel):
     profile_id: int
@@ -144,6 +151,26 @@ class GroupVoteRequest(BaseModel):
     profile_id: int
     movie_id: int
 
+class FamilyWatchlistAddRequest(BaseModel):
+    movie_id: int
+    scheduled_for: datetime | None = None
+
+class FamilyWatchlistVoteRequest(BaseModel):
+    profile_id: int
+    vote: str = Field(default="yes", pattern="^(yes|no)$")
+
+class FamilyMovieNightRequest(BaseModel):
+    profile_ids: list[int] = Field(min_length=2, max_length=5)
+    free_minutes: int = Field(default=180, ge=30, le=600)
+    mood: str | None = Field(default=None, max_length=40)
+    request_text: str = Field(default="", max_length=500)
+    buffer_minutes: int = Field(default=15, ge=0, le=60)
+    finish_by: str | None = Field(default=None, pattern=r"^([01]?\d|2[0-3]):[0-5]\d$")
+    scheduled_for: datetime | None = None
+
+class FamilyWatchlistStatusRequest(BaseModel):
+    status: str = Field(pattern="^(suggested|planned|watched|removed)$")
+
 class FamilyInviteCreateRequest(BaseModel):
     email: EmailStr
     role: str = Field(default="member", pattern="^(member|child)$")
@@ -153,6 +180,11 @@ class FamilyInviteAcceptRequest(BaseModel):
 
 class FamilyMemberRoleRequest(BaseModel):
     role: str = Field(pattern="^(member|child)$")
+
+class FamilyMemberSafetyRequest(BaseModel):
+    age_group: str = Field(pattern="^(under13|teen|adult)$")
+    excluded_genres: list[str] = Field(default_factory=list, max_length=12)
+    block_unrated: bool = True
 
 class CheckoutRequest(BaseModel):
     plan: str = Field(pattern="^(premium|family)$")

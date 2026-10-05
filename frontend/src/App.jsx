@@ -48,8 +48,10 @@ function Modal({ open, onClose, title, eyebrow, wide = false, children, lock = f
 }
 
 function Poster({ movie, compact = false }) {
-  if (movie?.poster_url) {
-    return <img className={`poster-img ${compact ? 'compact' : ''}`} src={movie.poster_url} alt={`${movie.title} poster`} />
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [movie?.poster_url])
+  if (movie?.poster_url && !imageFailed) {
+    return <img className={`poster-img ${compact ? 'compact' : ''}`} src={movie.poster_url} alt={`${movie.title} poster`} loading="lazy" onError={() => setImageFailed(true)} />
   }
   return (
     <div className={`poster-fallback ${moodClass(movie?.moods?.[0])} ${compact ? 'compact' : ''}`}>
@@ -1077,10 +1079,10 @@ function CompareModal({ open, onClose, movies, compareIds, toggleCompare, user, 
 }
 
 
-function FamilyModal({ open, onClose, user }) {
+function FamilyModal({ open, onClose, user, movies=[], onProfileChanged }) {
   const genreOptions=['Action','Adventure','Animation','Comedy','Crime','Drama','Fantasy','Horror','Romance','Science Fiction','Thriller']
   const moodOptions=['Happy','Relaxed','Sad/Cathartic','Thrilled','Romantic','Nostalgic']
-  const emptyEditor={id:null,name:'',preferred_genres:[],disliked_genres:[],preferred_moods:[]}
+  const emptyEditor={id:null,name:'',preferred_genres:[],disliked_genres:[],preferred_moods:[],age_group:'under13',excluded_genres:['Horror'],block_unrated:true}
   const [profiles,setProfiles]=useState([])
   const [editor,setEditor]=useState(emptyEditor)
   const [selected,setSelected]=useState([])
@@ -1100,10 +1102,12 @@ function FamilyModal({ open, onClose, user }) {
   const [inviteEmail,setInviteEmail]=useState('')
   const [inviteRole,setInviteRole]=useState('member')
   const [inviteLink,setInviteLink]=useState('')
+  const [watchlist,setWatchlist]=useState([]),[activitySummary,setActivitySummary]=useState(null),[notifications,setNotifications]=useState([])
+  const [watchlistMovieId,setWatchlistMovieId]=useState(''),[nightTime,setNightTime]=useState(''),[finishBy,setFinishBy]=useState(''),[nightBuffer,setNightBuffer]=useState(15),[nightPlan,setNightPlan]=useState(null)
 
   const load=async()=>{
     if(!open||!user)return
-    try{const [rows,home]=await Promise.all([api.profiles(),api.familyHousehold()]);setProfiles(rows);setHousehold(home);setError('')}catch(e){setError(e.message)}
+    try{const [rows,home,list,summary,notices]=await Promise.all([api.profiles(),api.familyHousehold(),api.familyWatchlist(),api.familyActivitySummary(),api.familyNotifications()]);setProfiles(rows);setHousehold(home);setWatchlist(list);setActivitySummary(summary);setNotifications(notices);setError('')}catch(e){setError(e.message)}
   }
   useEffect(()=>{if(open){load();setGroup(null);setComparison(null);setResult(null);setCompareIds([]);setVotes({});setHistory(null);setNotice('');const token=new URLSearchParams(window.location.search).get('family_invite');if(token){api.acceptFamilyInvite(token).then(r=>{setNotice(r.message);window.history.replaceState({},'',window.location.pathname);load()}).catch(e=>setError(e.message))}}},[open,user?.id])
 
@@ -1112,22 +1116,23 @@ function FamilyModal({ open, onClose, user }) {
     setBusy(true);try{const r=await api.inviteFamilyMember({email:inviteEmail.trim(),role:inviteRole});setInviteLink(`${window.location.origin}${r.invite_path}`);setInviteEmail('');setNotice('Invitation created. Copy and share the link below.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}
   }
   const changeMemberRole=async(id,role)=>{setBusy(true);try{await api.updateFamilyMemberRole(id,role);setNotice('Family member role updated.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const changeMemberSafety=async(member,age_group)=>{setBusy(true);try{await api.updateFamilyMemberSafety(member.id,{age_group,excluded_genres:member.safety?.excluded_genres||['Horror'],block_unrated:true});setNotice(`Content filter updated for ${member.display_name}.`);await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const removeMember=async id=>{if(!confirm('Remove this user from the Family plan?'))return;setBusy(true);try{await api.removeFamilyMember(id);setNotice('Family member removed.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const copyInvite=async()=>{try{await navigator.clipboard.writeText(inviteLink);setNotice('Invite link copied.')}catch{setNotice('Copy the invite link shown below.')}}
 
   const toggleList=(key,value)=>setEditor(e=>({...e,[key]:e[key].includes(value)?e[key].filter(x=>x!==value):[...e[key],value]}))
   const startNew=()=>{setEditor(emptyEditor);setHistory(null)}
-  const editProfile=p=>{setEditor({id:p.id,name:p.name,preferred_genres:p.preferences?.preferred_genres||[],disliked_genres:p.preferences?.disliked_genres||[],preferred_moods:p.preferences?.preferred_moods||[]});setHistory(null)}
+  const editProfile=p=>{setEditor({id:p.id,name:p.name,preferred_genres:p.preferences?.preferred_genres||[],disliked_genres:p.preferences?.disliked_genres||[],preferred_moods:p.preferences?.preferred_moods||[],age_group:p.safety?.age_group||'all',excluded_genres:p.safety?.excluded_genres||[],block_unrated:p.safety?.block_unrated??true});setHistory(null)}
   const saveProfile=async()=>{
     if(!editor.name.trim()){setError('Enter a profile display name.');return}
     setBusy(true)
     try{
-      const body={name:editor.name.trim(),preferred_genres:editor.preferred_genres,disliked_genres:editor.disliked_genres,preferred_moods:editor.preferred_moods}
+      const body={name:editor.name.trim(),preferred_genres:editor.preferred_genres,disliked_genres:editor.disliked_genres,preferred_moods:editor.preferred_moods,age_group:editor.age_group,excluded_genres:editor.excluded_genres,block_unrated:editor.block_unrated}
       if(editor.id) await api.updateProfile(editor.id,body); else await api.createProfile(body)
       setEditor(emptyEditor);setNotice(editor.id?'Profile updated.':'Profile created.');await load()
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
-  const switchTo=async id=>{setBusy(true);try{await api.switchProfile(id);setNotice('Active profile switched. Recommendations and watch history now use this profile.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const switchTo=async id=>{setBusy(true);try{await api.switchProfile(id);setNotice('Active profile switched. Recommendations and watch history now use this profile.');await load();onProfileChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const remove=async id=>{if(!confirm('Delete this family profile and its private watch history?'))return;setBusy(true);try{await api.deleteProfile(id);setSelected(x=>x.filter(v=>v!==id));if(editor.id===id)setEditor(emptyEditor);await load();setNotice('Profile removed.')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const showHistory=async p=>{setBusy(true);try{const [prefs,rows]=await Promise.all([api.profilePreferences(p.id),api.profileHistory(p.id)]);setHistory({profile:p,prefs,rows});setError('')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const toggleMember=id=>setSelected(x=>x.includes(id)?x.filter(v=>v!==id):[...x,id].slice(0,5))
@@ -1149,17 +1154,22 @@ function FamilyModal({ open, onClose, user }) {
     const movieId=Number(votes[profileId]);if(!movieId){setError('Choose a movie before voting.');return}
     setBusy(true);try{const r=await api.groupVote(group.session_id,profileId,movieId);setResult(r);setError('')}catch(e){setError(e.message)}finally{setBusy(false)}
   }
+  const addWatchlist=async()=>{if(!watchlistMovieId)return;setBusy(true);try{await api.addFamilyWatchlist({movie_id:Number(watchlistMovieId)});setNotice('Movie added to the shared family watchlist.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const voteWatchlist=async(item,vote)=>{const active=profiles.find(p=>p.active);if(!active){setError('Select a household profile before voting.');return}setBusy(true);try{await api.voteFamilyWatchlist(item.id,active.id,vote);await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const markWatchlist=async(item,status)=>{setBusy(true);try{await api.updateFamilyWatchlist(item.id,status);await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const planFamilyNight=async()=>{if(selected.length<2){setError('Choose at least two participants for a family movie night.');return}setBusy(true);setError('');setNightPlan(null);try{const result=await api.familyMovieNightPlan({profile_ids:selected,free_minutes:Number(minutes)||180,mood:groupMood||null,request_text:requestText,buffer_minutes:Number(nightBuffer)||0,finish_by:finishBy||null,scheduled_for:nightTime?new Date(nightTime).toISOString():null});setNightPlan(result);setNotice('Family movie night planned and added to the shared watchlist.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const markNoticeRead=async id=>{try{await api.readFamilyNotification(id);await load()}catch(e){setError(e.message)}}
   const participants=household?.participants||[]
   const managedIds=new Set(participants.filter(p=>p.participant_type==='managed_profile').map(p=>p.id))
   const managedProfiles=profiles.filter(p=>managedIds.has(p.id))
 
-  return <Modal open={open} onClose={onClose} title="Family profiles & group choice" eyebrow="5 PRIVATE PROFILES · CONSENSUS SCORING · HUMAN VOTING" wide>
+  return <Modal open={open} onClose={onClose} title="Family plan" eyebrow="PROFILES · SAFE DISCOVERY · SHARED WATCHLIST · MOVIE NIGHT" wide>
     {user?.plan!=='family'&&!household?<div className="empty-card"><div className="big-symbol">⌂</div><h3>Family plan feature</h3><p>Upgrade to Family or accept a household invitation to use shared profiles, preferences, and group decisions.</p></div>:<>
       {error&&<div className="error-box">{error}</div>}{notice&&<div className="success-box">{notice}</div>}
       {household&&<section className="family-household family-panel">
-        <div className="family-section-head"><div><span className="overline">FAMILY HOUSEHOLD</span><h3>Plan owner & members</h3><p>{household.members.length}/{household.max_members} places used · Your role: {household.current_role}</p></div>{household.current_role==='owner'&&<span className="owner-badge">Owner</span>}</div>
-        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<><select value={m.role} onChange={e=>changeMemberRole(m.id,e.target.value)} disabled={busy}><option value="member">Member</option><option value="child">Child</option></select><button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button></>:null}</div>)}</div>
-        {household.can_manage&&<div className="household-invite"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><select value={inviteRole} onChange={e=>setInviteRole(e.target.value)}><option value="member">Member</option><option value="child">Child</option></select><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
+        <div className="family-section-head"><div><span className="overline">FAMILY HOUSEHOLD</span><h3>Plan owner & members</h3><p>{household.participants.length}/{household.max_members} people · Your role: {household.current_role}</p></div>{household.current_role==='owner'&&<span className="owner-badge">Owner</span>}</div>
+        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<><select value={m.role} onChange={e=>changeMemberRole(m.id,e.target.value)} disabled={busy}><option value="member">Member</option><option value="child">Child</option></select>{m.role==='child'&&<select aria-label={`Content filter for ${m.display_name}`} value={m.safety?.age_group||'under13'} onChange={e=>changeMemberSafety(m,e.target.value)} disabled={busy}><option value="under13">Up to PG</option><option value="teen">Up to PG-13</option><option value="adult">Up to NC-17</option></select>}<button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button></>:null}</div>)}</div>
+        {household.can_manage&&<div className="household-invite"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><select value={inviteRole} onChange={e=>setInviteRole(e.target.value)}><option value="member">Member</option><option value="child">Child</option></select><button className="btn-primary" onClick={inviteMember} disabled={busy||household.participants.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
         {inviteLink&&<div className="invite-link"><code>{inviteLink}</code><button className="btn-secondary" onClick={copyInvite}>Copy link</button></div>}
         {!!household.pending_invites.length&&<div className="pending-invites"><strong>Pending invitations</strong>{household.pending_invites.map(i=><span key={i.id}>{i.email} · expires {new Date(i.expires_at).toLocaleDateString()}</span>)}</div>}
       </section>}
@@ -1179,6 +1189,7 @@ function FamilyModal({ open, onClose, user }) {
             <div className="preference-block"><strong>Preferred genres</strong><div className="choice-chips">{genreOptions.map(g=><button type="button" className={editor.preferred_genres.includes(g)?'active':''} onClick={()=>toggleList('preferred_genres',g)} key={g}>{g}</button>)}</div></div>
             <div className="preference-block"><strong>Disliked genres</strong><div className="choice-chips danger">{genreOptions.map(g=><button type="button" className={editor.disliked_genres.includes(g)?'active':''} onClick={()=>toggleList('disliked_genres',g)} key={g}>{g}</button>)}</div></div>
             <div className="preference-block"><strong>Favourite moods</strong><div className="choice-chips">{moodOptions.map(m=><button type="button" className={editor.preferred_moods.includes(m)?'active':''} onClick={()=>toggleList('preferred_moods',m)} key={m}>{m}</button>)}</div></div>
+            <div className="preference-block family-safety-settings"><strong>Child safety & content filters</strong><label>Age filter<select value={editor.age_group} onChange={e=>setEditor({...editor,age_group:e.target.value})}><option value="all">No age rating limit</option><option value="under13">Under 13 · up to PG</option><option value="teen">Teen · up to PG-13</option><option value="adult">Adult · up to NC-17</option></select></label><label className="safety-toggle"><input type="checkbox" checked={editor.block_unrated} onChange={e=>setEditor({...editor,block_unrated:e.target.checked})}/> Hide titles without a known content rating</label><div className="preference-block"><strong>Always exclude genres</strong><div className="choice-chips danger">{genreOptions.map(g=><button type="button" className={editor.excluded_genres.includes(g)?'active':''} onClick={()=>toggleList('excluded_genres',g)} key={g}>{g}</button>)}</div></div><small>Ratings come from TMDB when available; unrated titles can be hidden for profiles with an age filter.</small></div>
             <div className="form-actions"><button className="btn-primary" disabled={busy} onClick={saveProfile}>{editor.id?'Save profile changes':'Create profile'}</button>{editor.id&&<button className="btn-secondary" onClick={startNew}>Cancel</button>}</div>
           </div>
 
@@ -1189,7 +1200,9 @@ function FamilyModal({ open, onClose, user }) {
         <section className="family-panel group-panel">
           <div className="family-section-head"><div><span className="overline">02 · GROUP SESSION</span><h3>Who is watching?</h3><p>Choose from one combined list of real accounts and optional managed profiles.</p></div></div>
           <div className="participant-list">{participants.map(p=><label className={`participant-choice ${selected.includes(p.id)?'selected':''}`} key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/><span>{p.name?.[0]?.toUpperCase()||'P'}</span><div><strong>{p.name}</strong><small>{p.participant_type==='account'?`${p.role} account`:p.subtitle}</small></div></label>)}</div>
-          <div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
+          <div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button><div className="two-col family-date-controls"><label>Finish by (optional)<input type="time" value={finishBy} onChange={e=>setFinishBy(e.target.value)}/></label><label>Schedule date & time (optional)<input type="datetime-local" value={nightTime} onChange={e=>setNightTime(e.target.value)}/></label><label>Wind-down buffer<input type="number" min="0" max="60" value={nightBuffer} onChange={e=>setNightBuffer(e.target.value)}/><small>minutes</small></label></div><button className="btn-secondary full" disabled={busy||selected.length<2} onClick={planFamilyNight}>Build family movie night plan</button></div>
+
+          {nightPlan&&<div className="family-night-plan"><span className="overline">FAMILY MOVIE NIGHT PLAN</span><h4>{nightPlan.plan?.type==='double'?'Double feature':nightPlan.plan?.type==='single'?'Single movie':'No matching plan'}</h4><p>{nightPlan.plan?.message}</p>{nightPlan.scheduled_for&&<p>Shared calendar opening: {new Date(nightPlan.scheduled_for).toLocaleString()}</p>}{nightPlan.availability_note&&<p>{nightPlan.availability_note}</p>}{nightPlan.plan?.movies?.map(movie=><div className="family-night-movie" key={movie.id}><Poster movie={movie} compact/><span><strong>{movie.title}</strong><small>{movie.runtime} min · {movie.rating}/10</small></span></div>)}</div>}
 
           {group?.results?.length>0&&<div className="group-results advanced"><div className="family-section-head compact"><div><span className="overline">03 · CONSENSUS RESULTS</span><h4>Best compromises</h4></div><span className="session-pill">Session {group.session_id.slice(0,7)}</span></div>{group.results.slice(0,8).map(m=><div className="group-pick scored" key={m.id}><Poster movie={m} compact/><div className="group-pick-main"><div className="group-pick-title"><strong>{m.title}</strong><b>{m.group_score}% consensus</b></div><p>{m.reason}</p><div className="member-score-row">{m.consensus?.member_scores?.map(ms=><span className={ms.conflicts?.length?'conflict':ms.score>=60?'good':''} key={ms.profile_id}>{ms.profile_name} {Math.round(ms.score)}%</span>)}</div></div><label className="compare-check"><input type="checkbox" checked={compareIds.includes(m.id)} onChange={()=>toggleCompare(m.id)}/> Compare</label></div>)}<button className="btn-secondary full" disabled={compareIds.length<2||compareIds.length>4||busy} onClick={compare}>Compare selected ({compareIds.length}/4)</button></div>}
 
@@ -1200,6 +1213,9 @@ function FamilyModal({ open, onClose, user }) {
           {result?.winner&&<div className="final-winner"><span className="overline">CURRENT FAMILY WINNER</span><h3>✦ {result.winner.title}</h3><div className="winner-metrics"><span>{result.winner.votes} votes</span><span>{result.winner.group_score}% consensus</span><span>{result.winner.final_score}% final score</span></div><p>{result.explanation}</p><small>{result.votes_cast}/{result.members} participating profiles have voted · Status: {result.status}</small></div>}
         </section>
       </div>
+      <section className="family-panel family-shared-tools"><div className="family-section-head"><div><span className="overline">06 · HOUSEHOLD WATCHLIST</span><h3>Shared watchlist & voting</h3><p>Add a movie, let household profiles vote, and mark the final pick as watched.</p></div></div><div className="family-watchlist-add"><select value={watchlistMovieId} onChange={e=>setWatchlistMovieId(e.target.value)}><option value="">Choose a movie to add…</option>{movies.map(m=><option value={m.id} key={m.id}>{m.title} ({m.year})</option>)}</select><button className="btn-primary" disabled={busy||!watchlistMovieId} onClick={addWatchlist}>Add movie</button></div><div className="family-watchlist">{watchlist.map(item=><article className="family-watchlist-item" key={item.id}><Poster movie={item.movie} compact/><div className="family-watchlist-title"><strong>{item.movie?.title}</strong><small>{item.status} · Added by {item.added_by}{item.scheduled_for?` · ${new Date(item.scheduled_for).toLocaleString()}`:''}</small><span>{item.yes_votes} yes · {item.no_votes} no · Your vote: {item.my_vote||'none'}</span></div><div className="family-watchlist-actions"><button className="btn-secondary" disabled={busy} onClick={()=>voteWatchlist(item,'yes')}>Vote yes</button><button className="btn-secondary" disabled={busy} onClick={()=>voteWatchlist(item,'no')}>Vote no</button>{item.status!=='watched'&&<button className="danger-link" disabled={busy} onClick={()=>markWatchlist(item,'watched')}>Mark watched</button>}</div></article>)}{!watchlist.length&&<p className="muted">The family watchlist is empty. Add a movie above or create a movie-night plan.</p>}</div></section>
+      {activitySummary&&<section className="family-panel family-activity"><div className="family-section-head"><div><span className="overline">07 · SHARED ACTIVITY</span><h3>Household summary</h3><p>Aggregated totals only; this view does not show member-by-member history.</p></div></div><div className="family-summary-stats"><div><strong>{activitySummary.profile_count}</strong><span>profiles</span></div><div><strong>{activitySummary.unique_movies}</strong><span>unique movies</span></div><div><strong>{Math.round(activitySummary.total_watch_minutes/60)}h</strong><span>watch time</span></div><div><strong>{activitySummary.watched_events}</strong><span>watched events</span></div></div><p className="family-top-genres">Popular household genres: {activitySummary.top_genres?.map(x=>`${x.genre} (${x.count})`).join(' · ')||'No viewing data yet'}</p></section>}
+      {!!notifications.length&&<section className="family-panel family-notifications"><div className="family-section-head"><div><span className="overline">08 · FAMILY NOTIFICATIONS</span><h3>Movie night reminders & activity</h3></div></div>{notifications.map(n=><div className={`family-notification ${n.read?'read':''}`} key={n.id}><span>{n.kind==='movie_night'?'◷':'✦'}</span><p>{n.message}{n.scheduled_for&&<small> · {new Date(n.scheduled_for).toLocaleString()}</small>}</p>{!n.read&&<button className="danger-link" onClick={()=>markNoticeRead(n.id)}>Mark read</button>}</div>)}</section>}
     </>}
   </Modal>
 }
@@ -1286,17 +1302,18 @@ function AdminModal({ open, onClose, onCatalogueChanged }) {
   useEffect(()=>{load()},[open])
   const find=async()=>{setBusy(true);try{setMovies(await api.adminMovies(query))}catch(e){setError(e.message)}finally{setBusy(false)}}
   const importPopular=async()=>{setBusy(true);setError('');setNotice('');try{const r=await api.adminImportPopular(5);setNotice(`Catalogue updated: ${r.added} new popular movies imported. Total ${r.total}.`);await load();onCatalogueChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const syncTmdbImages=async()=>{setBusy(true);setError('');setNotice('');try{const r=await api.adminSyncTmdbImages();setNotice(`TMDB sync complete: ${r.posters_updated} posters, ${r.backdrops_updated} backdrops, and ${r.ratings_updated} content ratings added (${r.checked} titles checked).`);await load();onCatalogueChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const enrichProducers=async()=>{setBusy(true);setError('');setNotice('');try{const r=await api.adminEnrichProducers(120);setNotice(`Producer enrichment complete: ${r.movies_with_verified_producers} of ${r.movies_checked} checked movies now have verified producer credits.`)}catch(e){setError(e.message)}finally{setBusy(false)}}
   const choose=m=>{setSelected(m);setTrailer(m.trailer_youtube_url||'');setFeatured(Boolean(m.featured));setNotice('');setError('')}
-  const saveMedia=async()=>{if(!selected)return;setBusy(true);try{await api.adminUpdateMovie(selected.id,{trailer_youtube_url:trailer,featured});setNotice('Movie media settings saved.');const m=await api.adminMovies(query);setMovies(m);const refreshed=m.find(x=>x.id===selected.id);if(refreshed)setSelected(refreshed);onCatalogueChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const saveMedia=async()=>{if(!selected)return;setBusy(true);try{await api.adminUpdateMovie(selected.id,{trailer_youtube_url:trailer,featured,content_rating:selected.content_rating||''});setNotice('Movie media and content rating saved.');const m=await api.adminMovies(query);setMovies(m);const refreshed=m.find(x=>x.id===selected.id);if(refreshed)setSelected(refreshed);onCatalogueChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const upload=async(kind,file)=>{if(!selected||!file)return;setBusy(true);try{const r=await api.adminUploadMovieImage(selected.id,kind,file);setNotice(`${kind==='poster'?'Poster':'Backdrop'} uploaded successfully.`);setSelected(x=>({...x,...r.movie}));setMovies(await api.adminMovies(query));onCatalogueChanged?.()}catch(e){setError(e.message)}finally{setBusy(false)}}
   return <Modal open={open} onClose={onClose} title="CineSense administration" eyebrow="CATALOGUE · MEDIA · USERS · SECURITY" wide>
     <div className="admin-tabs"><button className={tab==='overview'?'active':''} onClick={()=>setTab('overview')}>Overview</button><button className={tab==='movies'?'active':''} onClick={()=>setTab('movies')}>Movie media</button><button className={tab==='users'?'active':''} onClick={()=>setTab('users')}>Users</button><button className={tab==='security'?'active':''} onClick={()=>setTab('security')}>Security</button></div>
     {error&&<div className="error-box">{error}</div>}{notice&&<div className="success-box">{notice}</div>}
-    {tab==='overview'&&overview&&<><div className="admin-overview-grid"><div><span>Users</span><strong>{overview.users}</strong></div><div><span>Movies</span><strong>{overview.movies}</strong></div><div><span>Family profiles</span><strong>{overview.family_profiles}</strong></div><div><span>Media uploads</span><strong>{overview.uploads}</strong></div><div><span>TMDB search</span><strong>{overview.tmdb_configured?'Connected':'Needs API key'}</strong></div><div><span>Environment</span><strong>{overview.environment}</strong></div></div><div className="admin-catalogue-action"><div><h3>Expand the movie catalogue</h3><p>With TMDB_API_KEY configured, CineSense can import popular titles in bulk and automatically import search results that are not already local.</p></div><button className="btn-primary" disabled={busy||!overview.tmdb_configured} onClick={importPopular}>{overview.tmdb_configured?'Import popular movies':'Add TMDB key first'}</button></div><div className="admin-catalogue-action"><div><h3>Enrich verified producer credits</h3><p>Producer similarity uses TMDB crew credits stored in a separate table. Run enrichment in batches so “Same producer” can use verified people rather than guessing from studio names.</p></div><button className="btn-secondary" disabled={busy||!overview.tmdb_configured} onClick={enrichProducers}>{overview.tmdb_configured?'Enrich producer data':'Add TMDB key first'}</button></div></>}
+    {tab==='overview'&&overview&&<><div className="admin-overview-grid"><div><span>Users</span><strong>{overview.users}</strong></div><div><span>Movies</span><strong>{overview.movies}</strong></div><div><span>Family profiles</span><strong>{overview.family_profiles}</strong></div><div><span>Media uploads</span><strong>{overview.uploads}</strong></div><div><span>TMDB search</span><strong>{overview.tmdb_configured?'Connected':'Needs API key'}</strong></div><div><span>Environment</span><strong>{overview.environment}</strong></div></div><div className="admin-catalogue-action"><div><h3>Load missing TMDB artwork</h3><p>Fetch poster and backdrop paths for existing TMDB-linked movies that currently have no artwork.</p></div><button className="btn-primary" disabled={busy||!overview.tmdb_configured} onClick={syncTmdbImages}>{busy?'Syncing images…':overview.tmdb_configured?'Sync TMDB images':'Add TMDB key first'}</button></div><div className="admin-catalogue-action"><div><h3>Expand the movie catalogue</h3><p>With TMDB_API_KEY configured, CineSense can import popular titles in bulk and automatically import search results that are not already local.</p></div><button className="btn-primary" disabled={busy||!overview.tmdb_configured} onClick={importPopular}>{overview.tmdb_configured?'Import popular movies':'Add TMDB key first'}</button></div><div className="admin-catalogue-action"><div><h3>Enrich verified producer credits</h3><p>Producer similarity uses TMDB crew credits stored in a separate table. Run enrichment in batches so “Same producer” can use verified people rather than guessing from studio names.</p></div><button className="btn-secondary" disabled={busy||!overview.tmdb_configured} onClick={enrichProducers}>{overview.tmdb_configured?'Enrich producer data':'Add TMDB key first'}</button></div></>}
     {tab==='movies'&&<div className="admin-movie-layout">
       <div className="admin-movie-list"><div className="admin-search"><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Find movie to manage" onKeyDown={e=>e.key==='Enter'&&find()}/><button onClick={find}>Search</button></div>{movies.map(m=><button className={selected?.id===m.id?'active':''} key={m.id} onClick={()=>choose(m)}><Poster movie={m} compact/><span><strong>{m.title}</strong><small>{m.year} · {m.poster_url?'Poster ready':'No poster'}</small></span></button>)}</div>
-      <div className="admin-media-editor">{selected?<><div className="admin-preview" style={{backgroundImage:selected.backdrop_url?`linear-gradient(180deg,rgba(5,7,11,.15),#0d1017),url(${selected.backdrop_url})`:undefined}}><Poster movie={selected}/><div><span className="overline">MOVIE MEDIA</span><h3>{selected.title}</h3><p>Upload eye-catching artwork and choose the trailer used on the home hero.</p></div></div><label>Poster image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>upload('poster',e.target.files?.[0])}/></label><label>Backdrop image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>upload('backdrop',e.target.files?.[0])}/></label><label>YouTube trailer URL<input value={trailer} onChange={e=>setTrailer(e.target.value)} placeholder="https://www.youtube.com/watch?v=..."/></label><label className="feature-check"><input type="checkbox" checked={featured} onChange={e=>setFeatured(e.target.checked)}/> Use this movie/trailer as the home-page hero background</label><button className="btn-primary" disabled={busy} onClick={saveMedia}>Save media settings</button><p className="fine-print">Uploads accept JPG, PNG or WebP only and are size/signature validated by the backend.</p></>:<div className="empty-card"><h3>Select a movie</h3><p>Choose a catalogue movie to upload its poster/backdrop or attach a YouTube trailer.</p></div>}</div>
+      <div className="admin-media-editor">{selected?<><div className="admin-preview" style={{backgroundImage:selected.backdrop_url?`linear-gradient(180deg,rgba(5,7,11,.15),#0d1017),url(${selected.backdrop_url})`:undefined}}><Poster movie={selected}/><div><span className="overline">MOVIE MEDIA</span><h3>{selected.title}</h3><p>Upload eye-catching artwork and choose the trailer used on the home hero.</p></div></div><label>Poster image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>upload('poster',e.target.files?.[0])}/></label><label>Backdrop image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>upload('backdrop',e.target.files?.[0])}/></label><label>US content rating<input value={selected.content_rating||''} onChange={e=>setSelected({...selected,content_rating:e.target.value.toUpperCase()})} placeholder="G, PG, PG-13, R, NC-17" maxLength={16}/></label><label>YouTube trailer URL<input value={trailer} onChange={e=>setTrailer(e.target.value)} placeholder="https://www.youtube.com/watch?v=..."/></label><label className="feature-check"><input type="checkbox" checked={featured} onChange={e=>setFeatured(e.target.checked)}/> Use this movie/trailer as the home-page hero background</label><button className="btn-primary" disabled={busy} onClick={saveMedia}>Save media settings</button><p className="fine-print">Uploads accept JPG, PNG or WebP only and are size/signature validated by the backend.</p></>:<div className="empty-card"><h3>Select a movie</h3><p>Choose a catalogue movie to upload its poster/backdrop or attach a YouTube trailer.</p></div>}</div>
     </div>}
     {tab==='users'&&<div className="admin-user-table">{users.map(u=><div key={u.id}><span className="profile-avatar">{u.display_name?.[0]||'U'}</span><div><strong>{u.display_name}</strong><small>{u.email}</small></div><span>{u.plan}</span><b>{u.is_admin?'ADMIN':'USER'}</b></div>)}</div>}
     {tab==='security'&&security&&<div className="security-dashboard"><div className="security-score"><strong>{security.score}%</strong><span>security controls passing</span></div><div className="security-checks">{security.checks.map(c=><article className={c.passed?'pass':'warn'} key={c.area}><b>{c.passed?'✓':'!'} {c.area}</b><p>{c.detail}</p></article>)}</div><h3>Prompt attack regression tests</h3><div className="prompt-tests">{security.prompt_tests.map((t,i)=><div key={i}><span>{t.blocked?'Blocked':'Allowed'}</span><code>{t.input}</code><small>{t.risk} · score {t.risk_score}</small></div>)}</div><h3>Recent security events</h3><div className="security-event-list">{events.slice(0,20).map((e,i)=><div key={i}><b>{e.category}</b><span>{e.detail}</span><small>{new Date(e.created_at).toLocaleString()}</small></div>)}</div></div>}
@@ -1357,6 +1374,7 @@ export default function App() {
   const [billingOpen, setBillingOpen] = useState(false)
   const [adminOpen, setAdminOpen] = useState(false)
   const [heroData, setHeroData] = useState(null)
+  const [heroBackdropFailed, setHeroBackdropFailed] = useState(false)
   const [billingPlan, setBillingPlan] = useState('premium')
   const [selectedMovie, setSelectedMovie] = useState(null)
   const [similarityMovie, setSimilarityMovie] = useState(null)
@@ -1369,6 +1387,9 @@ export default function App() {
         'or how much free time you have. I’ll keep the conversation natural and explain why each suggestion fits.'
     }
   ])
+
+  const heroBackdrop = heroData?.movie?.backdrop_url || movies.find(movie => movie.backdrop_url)?.backdrop_url || ''
+  useEffect(() => setHeroBackdropFailed(false), [heroBackdrop])
 
   const loadApp = async () => {
     setLoading(true)
@@ -1393,6 +1414,8 @@ export default function App() {
       setLoading(false)
     }
   }
+
+  const refreshCatalogueForProfile = () => api.movies().then(setMovies).catch(e=>setBootError(e.message))
 
   useEffect(() => {
     loadApp()
@@ -1492,7 +1515,7 @@ export default function App() {
 
       <header className="hero">
         {heroData?.trailer_youtube_url&&<div className="hero-video-wrap"><iframe title={`${heroData?.movie?.title||'Featured movie'} trailer`} src={`${heroData.trailer_youtube_url}?autoplay=1&mute=1&controls=0&loop=1&playlist=${heroData.trailer_youtube_url.split('/').pop()}&modestbranding=1&rel=0&playsinline=1`} allow="autoplay; encrypted-media; picture-in-picture" tabIndex="-1" /></div>}
-        {!heroData?.trailer_youtube_url&&heroData?.movie?.backdrop_url&&<div className="hero-backdrop" style={{backgroundImage:`url(${heroData.movie.backdrop_url})`}}/>}
+        {!heroData?.trailer_youtube_url&&heroBackdrop&&!heroBackdropFailed&&<img className="hero-backdrop" src={heroBackdrop} alt="" loading="eager" onError={() => setHeroBackdropFailed(true)} />}
         <div className="hero-media-overlay" />
         <div className="hero-glow hero-glow-one" />
         <div className="hero-glow hero-glow-two" />
@@ -1604,7 +1627,7 @@ export default function App() {
       <AuthModal
         open={authOpen}
         onClose={() => setAuthOpen(false)}
-        onUser={setUser}
+        onUser={nextUser => { setUser(nextUser); refreshCatalogueForProfile() }}
       />
 
       <ConsentModal user={user} onUser={setUser} />
@@ -1626,7 +1649,7 @@ export default function App() {
         onNeedAuth={() => setAuthOpen(true)}
       />
 
-      <FamilyModal open={familyOpen} onClose={() => setFamilyOpen(false)} user={user} />
+      <FamilyModal open={familyOpen} onClose={() => setFamilyOpen(false)} user={user} movies={movies} onProfileChanged={refreshCatalogueForProfile} />
 
       <BillingModal open={billingOpen} onClose={() => setBillingOpen(false)} user={user} onUser={setUser} initialPlan={billingPlan} />
 

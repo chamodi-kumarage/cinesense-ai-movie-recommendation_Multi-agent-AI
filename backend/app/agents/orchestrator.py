@@ -1,7 +1,7 @@
 from datetime import datetime,timezone,timedelta
 import json,re,uuid
 from sqlalchemy.orm import Session
-from ..models import User,ChatTurn,AIUsage,ConversationState,Movie,PlannerActivity,ActiveProfile,ProfilePreference
+from ..models import User,ChatTurn,AIUsage,ProfileConversationState,Movie,Profile,PlannerActivity,ActiveProfile,ProfilePreference
 from ..security import encrypt_text,decrypt_text
 from ..protocol import AgentEnvelope
 from ..config import get_settings
@@ -21,25 +21,25 @@ class ConversationalOrchestratorAgent:
         self.guardian=GuardianAgent();self.mood=MoodPreferenceAgent();self.retrieval=RetrievalRecommendationAgent()
         self.comparison=ComparisonExplainabilityAgent();self.scheduler=MoodTimeSchedulerAgent()
 
-    def _env(self,trace_id,receiver,intent,payload):
-        return AgentEnvelope(trace_id=trace_id,sender=self.name,receiver=receiver,intent=intent,payload=payload)
+    def _env(self,trace_id,receiver,intent,payload,user_id=None):
+        return AgentEnvelope(trace_id=trace_id,sender=self.name,receiver=receiver,intent=intent,user_id=user_id,payload=payload)
 
-    def _history(self,db,user_id):
+    def _history(self,db,user_id,profile_id):
         cutoff=datetime.now(timezone.utc)-timedelta(days=settings.chat_retention_days)
-        for row in db.query(ChatTurn).filter(ChatTurn.user_id==user_id,ChatTurn.created_at<cutoff).all():db.delete(row)
+        for row in db.query(ChatTurn).filter(ChatTurn.user_id==user_id,ChatTurn.profile_id==profile_id,ChatTurn.created_at<cutoff).all():db.delete(row)
         db.commit()
-        rows=db.query(ChatTurn).filter(ChatTurn.user_id==user_id).order_by(ChatTurn.created_at.desc()).limit(10).all()
+        rows=db.query(ChatTurn).filter(ChatTurn.user_id==user_id,ChatTurn.profile_id==profile_id).order_by(ChatTurn.created_at.desc()).limit(10).all()
         rows.reverse()
         return [{"role":r.role,"content":decrypt_text(r.content_enc)} for r in rows]
 
-    def _remember(self,db,user_id,role,content):
-        db.add(ChatTurn(user_id=user_id,role=role,content_enc=encrypt_text(content)));db.commit()
-        rows=db.query(ChatTurn).filter(ChatTurn.user_id==user_id).order_by(ChatTurn.created_at.desc()).all()
+    def _remember(self,db,user_id,profile_id,role,content):
+        db.add(ChatTurn(user_id=user_id,profile_id=profile_id,role=role,content_enc=encrypt_text(content)));db.commit()
+        rows=db.query(ChatTurn).filter(ChatTurn.user_id==user_id,ChatTurn.profile_id==profile_id).order_by(ChatTurn.created_at.desc()).all()
         for row in rows[10:]:db.delete(row)
         db.commit()
 
-    def _load_state(self,db,user_id):
-        row=db.get(ConversationState,user_id)
+    def _load_state(self,db,profile_id):
+        row=db.get(ProfileConversationState,profile_id)
         if not row:return {"last_query":"","prefs":{},"movie_ids":[]}
         try:prefs=json.loads(row.prefs_json or "{}")
         except Exception:prefs={}
@@ -47,14 +47,24 @@ class ConversationalOrchestratorAgent:
         except Exception:movie_ids=[]
         return {"last_query":decrypt_text(row.last_query_enc),"prefs":prefs,"movie_ids":movie_ids}
 
-    def _save_state(self,db,user_id,query,prefs,movie_ids):
-        row=db.get(ConversationState,user_id)
+    def _save_state(self,db,profile_id,query,prefs,movie_ids):
+        row=db.get(ProfileConversationState,profile_id)
         if not row:
-            row=ConversationState(user_id=user_id);db.add(row)
+            row=ProfileConversationState(profile_id=profile_id);db.add(row)
         row.last_query_enc=encrypt_text(query or "")
         row.prefs_json=json.dumps(prefs or {},ensure_ascii=False)
         row.movie_ids_json=json.dumps(movie_ids or [])
         db.commit()
+
+    def _apply_profile_content_filters(self,db,profile_id,movies):
+        profile=db.get(Profile,profile_id)
+        if not profile:return movies
+        from ..services.family_logic import movie_allowed_for_profiles
+        filtered=[]
+        for item in movies:
+            movie=db.get(Movie,item.get("id"))
+            if movie and movie_allowed_for_profiles(movie,[profile],db):filtered.append(item)
+        return filtered
 
     def _intent(self,text):
         t=text.lower()
@@ -126,12 +136,13 @@ class ConversationalOrchestratorAgent:
         return intro+"\n"+"\n".join(items)+"\nTell me if you want something shorter, lighter, more intense, or if you want to compare two of them."
 
     async def chat(self,db,user,message,mood_override=None,dismissed_moods=None):
-        self._consume_quota(db,user);trace_id=str(uuid.uuid4());history=self._history(db,user.id)
-        state=self._load_state(db,user.id)
-        guard=self.guardian.inspect_input(db,self._env(trace_id,"guardian","inspect_input",{"message":message}),message)
+        profile_id=active_profile_id(db,user)
+        self._consume_quota(db,user);trace_id=str(uuid.uuid4());history=self._history(db,user.id,profile_id)
+        state=self._load_state(db,profile_id)
+        guard=self.guardian.inspect_input(db,self._env(trace_id,"guardian","inspect_input",{"message":message},user.id),message)
         if not guard["safe"]:
-            response=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"safety"}),guard["notice"])
-            self._remember(db,user.id,"user",message);self._remember(db,user.id,"assistant",response)
+            response=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"safety"},user.id),guard["notice"])
+            self._remember(db,user.id,profile_id,"user",message);self._remember(db,user.id,profile_id,"assistant",response)
             return {"trace_id":trace_id,"reply":response,"preferences":state.get("prefs",{}),"movies":[],"safety":guard["risk"]}
 
         clean=guard["sanitized"]
@@ -139,15 +150,20 @@ class ConversationalOrchestratorAgent:
         named_movie = self._movie_question(db, clean)
         info_words = ["about", "what is", "tell me", "who", "director", "cast", "plot", "story", "runtime", "rating", "source code", "worth watching", "good movie"]
         if named_movie and any(word in clean.lower() for word in info_words):
+            from ..services.family_logic import movie_allowed_for_profiles
+            profile=db.get(Profile,profile_id)
+            if profile and not movie_allowed_for_profiles(named_movie,[profile],db):
+                named_movie=None
+        if named_movie and any(word in clean.lower() for word in info_words):
             from .retrieval import movie_dict
             grounded = movie_dict(named_movie)
             reply = self._movie_info_reply(named_movie, clean)
-            reply = self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"movie_information"}),reply)
-            self._remember(db,user.id,"user",clean); self._remember(db,user.id,"assistant",reply)
-            self._save_state(db,user.id,clean,state.get("prefs") or {},[named_movie.id])
+            reply = self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"movie_information"},user.id),reply)
+            self._remember(db,user.id,profile_id,"user",clean); self._remember(db,user.id,profile_id,"assistant",reply)
+            self._save_state(db,profile_id,clean,state.get("prefs") or {},[named_movie.id])
             return {"trace_id":trace_id,"reply":reply,"preferences":state.get("prefs") or {},"movies":[grounded],"safety":guard["risk"],"ai_provider":"catalogue-grounded"}
 
-        current=self.mood.analyze(db,self._env(trace_id,"mood_preference","analyze",{"message":clean}),clean,mood_override,dismissed_moods)
+        current=self.mood.analyze(db,self._env(trace_id,"mood_preference","analyze",{"message":clean},user.id),clean,mood_override,dismissed_moods)
         previous=state.get("prefs") or {}
         prefs={
             "genres":current.get("genres") or previous.get("genres") or [],
@@ -163,8 +179,9 @@ class ConversationalOrchestratorAgent:
             prefs["mood"]="Relaxed"
         if "shorter" in lower and not current.get("time_available") and state.get("movie_ids"):
             previous_movies=self.retrieval.retrieve(
-                db,self._env(trace_id,"retrieval","fetch_previous_context",{"movie_ids":state["movie_ids"]}),
+                db,self._env(trace_id,"retrieval","fetch_previous_context",{"movie_ids":state["movie_ids"]},user.id),
                 "",{},user.id,explicit_ids=state["movie_ids"])
+            previous_movies=self._apply_profile_content_filters(db,profile_id,previous_movies)
             if previous_movies:
                 prefs["time_available"]=max(60,min(m["runtime"] for m in previous_movies)-10)
 
@@ -173,16 +190,17 @@ class ConversationalOrchestratorAgent:
             n=3 if "three" in lower or "first 3" in lower else 2
             ids=state["movie_ids"][:n]
             grounded=self.retrieval.retrieve(
-                db,self._env(trace_id,"retrieval","fetch_grounding",{"movie_ids":ids}),
+                db,self._env(trace_id,"retrieval","fetch_grounding",{"movie_ids":ids},user.id),
                 "",{},user.id,explicit_ids=ids)
+            grounded=self._apply_profile_content_filters(db,profile_id,grounded)
             result=await self.comparison.compare(
-                db,self._env(trace_id,"comparison","compare_from_chat",{"movie_ids":ids,"mood":prefs.get("mood")}),
+                db,self._env(trace_id,"comparison","compare_from_chat",{"movie_ids":ids,"mood":prefs.get("mood")},user.id),
                 grounded,prefs.get("mood"),clean)
             reply=self.guardian.inspect_output(
-                db,self._env(trace_id,"guardian","inspect_output",{"response_type":"comparison_chat"}),
+                db,self._env(trace_id,"guardian","inspect_output",{"response_type":"comparison_chat"},user.id),
                 result["explanation"])
-            self._remember(db,user.id,"user",clean);self._remember(db,user.id,"assistant",reply)
-            self._save_state(db,user.id,clean,prefs,ids)
+            self._remember(db,user.id,profile_id,"user",clean);self._remember(db,user.id,profile_id,"assistant",reply)
+            self._save_state(db,profile_id,clean,prefs,ids)
             return {"trace_id":trace_id,"reply":reply,"preferences":prefs,"movies":grounded,
                     "comparison":result,"safety":"low",
                     "ai_provider":settings.llm_provider if llm_service.enabled else "offline-demo"}
@@ -191,45 +209,47 @@ class ConversationalOrchestratorAgent:
             if user.plan=="free":
                 reply=("The full mood-and-time scheduler—including double-feature planning—is a Premium/Family feature in the project’s pricing model. "
                        "You can still use Free recommendations and comparisons within the daily AI allowance, or use the included demo account to evaluate the complete scheduler flow.")
-                self._remember(db,user.id,"user",clean);self._remember(db,user.id,"assistant",reply)
+                self._remember(db,user.id,profile_id,"user",clean);self._remember(db,user.id,profile_id,"assistant",reply)
                 return {"trace_id":trace_id,"reply":reply,"preferences":prefs,"movies":[],"safety":"low"}
             finish_by=self._finish_by(clean)
             if not prefs.get("time_available"):
                 reply=("I can absolutely turn this into a watch plan, but I’m missing one practical constraint: how many minutes of free time do you have? "
                        "You can answer naturally, for example “about 2 hours” or “150 minutes, and I need to finish before 11pm.” "
                        "I’ll keep your current mood and genre preferences while I wait for that one detail.")
-                self._remember(db,user.id,"user",clean);self._remember(db,user.id,"assistant",reply)
-                self._save_state(db,user.id,clean,prefs,state.get("movie_ids",[]))
+                self._remember(db,user.id,profile_id,"user",clean);self._remember(db,user.id,profile_id,"assistant",reply)
+                self._save_state(db,profile_id,clean,prefs,state.get("movie_ids",[]))
                 return {"trace_id":trace_id,"reply":reply,"preferences":prefs,"movies":[],"safety":"low"}
             candidates=self.retrieval.retrieve(
-                db,self._env(trace_id,"retrieval","schedule_candidates",{"genres":prefs["genres"],"mood":prefs["mood"],"runtime":prefs["time_available"]}),
+                db,self._env(trace_id,"retrieval","schedule_candidates",{"genres":prefs["genres"],"mood":prefs["mood"],"runtime":prefs["time_available"]},user.id),
                 clean,prefs,user.id,limit=12)
+            candidates=self._apply_profile_content_filters(db,profile_id,candidates)
             plan=self.scheduler.plan(
-                db,self._env(trace_id,"scheduler","build_plan_from_chat",{"candidate_count":len(candidates),"free_minutes":prefs["time_available"],"finish_by":finish_by}),
+                db,self._env(trace_id,"scheduler","build_plan_from_chat",{"candidate_count":len(candidates),"free_minutes":prefs["time_available"],"finish_by":finish_by},user.id),
                 candidates,prefs["time_available"],finish_by)
             titles=", ".join(m["title"] for m in plan["movies"]) or "no matching title"
             reply=(plan["message"]+"\n\n"+(f"Your plan is {titles}. " if plan["movies"] else "")+
                    "If you want, I can now make the plan lighter, more intense, shorter, or compare the selected films without losing this conversation context.")
-            reply=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"schedule_chat"}),reply)
+            reply=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"schedule_chat"},user.id),reply)
             ids=[m["id"] for m in plan["movies"]]
-            self._remember(db,user.id,"user",clean);self._remember(db,user.id,"assistant",reply)
-            self._save_state(db,user.id,clean,prefs,ids or state.get("movie_ids",[]))
+            self._remember(db,user.id,profile_id,"user",clean);self._remember(db,user.id,profile_id,"assistant",reply)
+            self._save_state(db,profile_id,clean,prefs,ids or state.get("movie_ids",[]))
             return {"trace_id":trace_id,"reply":reply,"preferences":prefs,"movies":plan["movies"],
                     "plan":plan,"safety":"low","ai_provider":settings.llm_provider if llm_service.enabled else "offline-demo"}
 
         conversational_only=bool(re.fullmatch(r"\s*(hi|hello|hey|thanks|thank you|good morning|good evening)[!. ]*\s*",clean.lower()))
         movies=[] if conversational_only else self.retrieval.retrieve(
-            db,self._env(trace_id,"retrieval","recommend",{"query":clean,"mood":prefs.get("mood"),"genres":prefs.get("genres"),"runtime":prefs.get("time_available")}),
-            clean,prefs,user.id,limit=10)
+            db,self._env(trace_id,"retrieval","recommend",{"query":clean,"mood":prefs.get("mood"),"genres":prefs.get("genres"),"runtime":prefs.get("time_available")},user.id),
+            clean,prefs,user.id,limit=50)
+        movies=self._apply_profile_content_filters(db,profile_id,movies)
         context="\\n".join(f"{m['title']} ({m['year']}), genres {m['genres']}, moods {m['moods']}, runtime {m['runtime']}, rating {m['rating']}, overview: {m['overview']}" for m in movies[:5])
         prompt=(f"User message: {clean}\\nDetected preferences: {json.dumps(prefs)}\\nReply as a friendly movie companion. "
                 "Be detailed enough to be genuinely helpful, not abrupt. Recommend up to three supplied catalogue options and explain each match. "
                 "Treat the user's message as a follow-up when recent history exists. Never invent facts.")
         reply=await llm_service.chat(prompt,context,history) or self._local_reply(clean,prefs,movies)
-        reply=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"chat","movie_count":len(movies)}),reply)
-        self._remember(db,user.id,"user",clean);self._remember(db,user.id,"assistant",reply)
-        if movies:self._save_state(db,user.id,clean,prefs,[m["id"] for m in movies[:4]])
-        elif current.get("mood") or current.get("genres") or current.get("time_available"):self._save_state(db,user.id,clean,prefs,state.get("movie_ids",[]))
+        reply=self.guardian.inspect_output(db,self._env(trace_id,"guardian","inspect_output",{"response_type":"chat","movie_count":len(movies)},user.id),reply)
+        self._remember(db,user.id,profile_id,"user",clean);self._remember(db,user.id,profile_id,"assistant",reply)
+        if movies:self._save_state(db,profile_id,clean,prefs,[m["id"] for m in movies[:4]])
+        elif current.get("mood") or current.get("genres") or current.get("time_available"):self._save_state(db,profile_id,clean,prefs,state.get("movie_ids",[]))
         return {"trace_id":trace_id,"reply":reply,"preferences":prefs,"movies":movies[:10],"safety":guard["risk"],
                 "ai_provider":settings.llm_provider if llm_service.enabled else "offline-demo"}
 
@@ -278,7 +298,9 @@ class ConversationalOrchestratorAgent:
         # Mood & Preference Agent may extract an implied mood from the what-if text; explicit UI mood stays authoritative.
         mood_signal=self.mood.analyze(db,self._env(trace_id,"mood_preference","comparison_context",{"text":free_text}),free_text or "compare these movies",mood,[]) if free_text else {"mood":mood}
         effective_mood=mood or mood_signal.get("mood")
+        profile_id=active_profile_id(db,user)
         movies=self.retrieval.retrieve(db,self._env(trace_id,"retrieval","fetch_grounding",{"movie_ids":movie_ids}),"",{},user.id,explicit_ids=movie_ids)
+        movies=self._apply_profile_content_filters(db,profile_id,movies)
         if len(movies)<2:raise ValueError("Please choose at least two valid movies.")
         effective_minutes=scenario_info.get("free_minutes",free_minutes)
         # Scheduler Agent contributes explicit time feasibility using the same shortlisted catalogue facts.
@@ -293,6 +315,12 @@ class ConversationalOrchestratorAgent:
 
     async def find_similar(self, db, user, movie_id, modes, weights=None, preset="overall", required_genre=None, year_mode="within_5", custom_year_min=None, custom_year_max=None, mood=None, free_minutes=None, limit=12):
         self._consume_quota(db,user); trace_id=str(uuid.uuid4())
+        profile_id=active_profile_id(db,user)
+        source_movie=db.get(Movie,movie_id)
+        from ..services.family_logic import movie_allowed_for_profiles
+        profile=db.get(Profile,profile_id)
+        if source_movie and profile and not movie_allowed_for_profiles(source_movie,[profile],db):
+            raise ValueError("This movie is hidden by the active profile's content filters.")
         allowed={"cast","story","genre","year","title","director","studio","producer","mood"}
         clean_modes=[m for m in (modes or []) if m in allowed]
         if not clean_modes: clean_modes=["story","genre"]
@@ -306,6 +334,7 @@ class ConversationalOrchestratorAgent:
             mood_signal=self.mood.analyze(db,self._env(trace_id,"mood_preference","similarity_context",{"mood":mood}),f"Find something similar but {mood}",mood,[])
             options["mood"]=mood_signal.get("mood") or mood
         raw=self.retrieval.find_similar(db,self._env(trace_id,"retrieval","find_similar",{"movie_id":movie_id,"modes":clean_modes,"preset":preset}),movie_id,options)
+        raw["results"]=[row for row in raw["results"] if (movie:=db.get(Movie,row["id"])) and (not profile or movie_allowed_for_profiles(movie,[profile],db))]
         if free_minutes and raw["results"]:
             self.scheduler.plan(db,self._env(trace_id,"scheduler","similarity_time_filter",{"free_minutes":free_minutes}),raw["results"][:12],free_minutes,None,0)
         raw["results"]=self.comparison.explain_similarity(db,self._env(trace_id,"comparison","explain_similarity",{"movie_id":movie_id,"result_count":len(raw["results"])}),raw["source"],raw["results"],clean_modes)
@@ -327,9 +356,11 @@ class ConversationalOrchestratorAgent:
         if not normalized_finish and query:
             normalized_finish=self._finish_by(query)
         effective_minutes=max(int(free_minutes)-int(buffer_minutes or 0),1)
+        profile_id=active_profile_id(db,user)
         text=query or f"{' '.join(genres)} {mood or ''} {effective_minutes} minutes"
         prefs={"genres":genres,"mood":mood,"time_available":effective_minutes,"disliked":[]}
-        candidates=self.retrieval.retrieve(db,self._env(trace_id,"retrieval","schedule_candidates",{"genres":genres,"mood":mood,"runtime":effective_minutes}),text,prefs,user.id,limit=12)
+        candidates=self.retrieval.retrieve(db,self._env(trace_id,"retrieval","schedule_candidates",{"genres":genres,"mood":mood,"runtime":effective_minutes}),text,prefs,user.id,limit=60)
+        candidates=self._apply_profile_content_filters(db,profile_id,candidates)
         result=self.scheduler.plan(
             db,
             self._env(trace_id,"scheduler","build_plan",{"candidate_count":len(candidates),"free_minutes":free_minutes,"finish_by":normalized_finish,"buffer_minutes":buffer_minutes}),
