@@ -8,7 +8,9 @@ from .config import get_settings
 from .services.seed import seed_movies,seed_demo_user,seed_admin_user
 from .models import MonitoringEvent
 from .routers import auth,movies,ai,audit,family,commerce,planner,admin,security_assessment,similarity
+from .routers import responsible_assessment
 settings=get_settings()
+
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -23,13 +25,16 @@ async def lifespan(app:FastAPI):
     finally:db.close()
     yield
 
+
 app=FastAPI(title=settings.app_name,version="1.0.0",
             description="Six-agent mood-aware movie discovery and companion platform.",lifespan=lifespan)
+
 allowed_origins = list(dict.fromkeys([
     settings.frontend_origin,
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]))
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,7 +43,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 app.include_router(auth.router);app.include_router(movies.router);app.include_router(ai.router);app.include_router(audit.router);app.include_router(family.router);app.include_router(commerce.router);app.include_router(planner.router);app.include_router(admin.router);app.include_router(security_assessment.router);app.include_router(similarity.router)
+app.include_router(responsible_assessment.router)
+
 from pathlib import Path
 UPLOAD_DIR=Path(__file__).resolve().parents[1]/"uploads"
 UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
@@ -51,15 +59,25 @@ async def security_headers(request: Request, call_next):
         length=request.headers.get("content-length")
         if length and int(length)>12*1024*1024:
             return JSONResponse({"detail":"Request body is too large."},status_code=413)
+
     response=await call_next(request)
+
     response.headers["X-Content-Type-Options"]="nosniff"
     response.headers["X-Frame-Options"]="SAMEORIGIN"
     response.headers["Referrer-Policy"]="strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"]="camera=(), microphone=(self), geolocation=()"
-    response.headers["Content-Security-Policy"]="default-src 'self'; img-src 'self' data: https://image.tmdb.org http://localhost:8000 http://127.0.0.1:8000; media-src 'self'; frame-src https://www.youtube.com https://youtube.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+
+    # Swagger UI and ReDoc documentation pages require external
+    # documentation assets. Keep the restrictive CSP for the
+    # CineSense application/API, but exempt the documentation routes.
+    if request.url.path not in {"/docs", "/redoc", "/openapi.json"}:
+        response.headers["Content-Security-Policy"]="default-src 'self'; img-src 'self' data: https://image.tmdb.org http://localhost:8000 http://127.0.0.1:8000; media-src 'self'; frame-src https://www.youtube.com https://youtube.com; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+
     if settings.environment=="production":
         response.headers["Strict-Transport-Security"]="max-age=31536000; includeSubDomains"
+
     return response
+
 
 @app.middleware("http")
 async def production_monitoring(request: Request, call_next):
@@ -81,6 +99,7 @@ async def production_monitoring(request: Request, call_next):
                 db.add(MonitoringEvent(level=level,event_type="http_request",detail_safe=detail));db.commit();db.close()
             except Exception:
                 pass
+
 
 @app.get("/api/health")
 def health():return {"ok":True,"service":settings.app_name,"agents":6,"topology":"hub-and-spoke","llm_provider":settings.llm_provider}

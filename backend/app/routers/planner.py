@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode, quote
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,7 @@ from ..agents.orchestrator import orchestrator
 from ..db import get_db
 from ..dependencies import get_current_user, require_consent
 from ..models import (
-    User, Movie, PlannerActivity, ProfileWatchEvent, CalendarConnection,
+    User, Movie, Profile, PlannerActivity, ProfileWatchEvent, CalendarConnection,
     CalendarBusySlot, ActiveProfile,
 )
 from ..schemas import (
@@ -45,6 +45,11 @@ def _aware(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _utc_iso(value: datetime) -> str:
+    # SQLite returns naive datetimes even for timezone=True columns.
+    return value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()
 
 
 def _active_profile(db: Session, user: User) -> int:
@@ -160,51 +165,82 @@ def planner_insights(
 
 @router.get("/planner/weekly-summary")
 def weekly_summary(
+    days: int = Query(7, ge=0, le=365),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     profile_id = _active_profile(db, user)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    events = (
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    events_query = (
         db.query(ProfileWatchEvent)
         .filter(
             ProfileWatchEvent.user_id == user.id,
             ProfileWatchEvent.profile_id == profile_id,
             ProfileWatchEvent.watched.is_(True),
-            ProfileWatchEvent.created_at >= cutoff,
         )
-        .order_by(ProfileWatchEvent.created_at.desc())
-        .all()
     )
-    movies = [m for m in (_movie_for_event(db, e) for e in events) if m]
+    if cutoff:
+        events_query = events_query.filter(ProfileWatchEvent.created_at >= cutoff)
+    events = events_query.order_by(ProfileWatchEvent.created_at.desc()).all()
+    valid_events = [(e, m) for e in events if (m := _movie_for_event(db, e))]
+    movies = [m for _, m in valid_events]
     genre_counts = Counter()
-    mood_counts = Counter()
     total_minutes = 0
     for movie in movies:
         total_minutes += movie.runtime or 0
         for genre in [x.strip() for x in (movie.genres or "").split("|") if x.strip()]:
             genre_counts[genre] += 1
-        for mood in [x.strip() for x in (movie.moods or "").split("|") if x.strip()]:
-            mood_counts[mood] += 1
 
     # Planner mood gives a more faithful signal of how the user actually felt.
-    activity_moods = Counter(
-        a.mood for a in db.query(PlannerActivity).filter(
+    activities_query = db.query(PlannerActivity).filter(
             PlannerActivity.user_id == user.id,
             PlannerActivity.profile_id == profile_id,
-            PlannerActivity.created_at >= cutoff,
-        ).all() if a.mood
-    )
-    effective_moods = activity_moods or mood_counts
-    avg = round(total_minutes / len(movies)) if movies else 0
+        )
+    if cutoff:
+        activities_query = activities_query.filter(PlannerActivity.created_at >= cutoff)
+    activities = activities_query.order_by(PlannerActivity.created_at.desc()).all()
+    activity_moods = Counter(a.mood for a in activities if a.mood)
+    planning_genres = Counter()
+    planned_ids = []
+    for activity in activities:
+        try:
+            planning_genres.update(json.loads(activity.genres_json or "[]"))
+            planned_ids.extend(json.loads(activity.movie_ids_json or "[]"))
+        except (ValueError, TypeError):
+            continue
+    recent_planned = []
+    seen = set()
+    for movie_id in planned_ids:
+        if movie_id in seen:
+            continue
+        seen.add(movie_id)
+        movie = db.get(Movie, movie_id)
+        if movie:
+            recent_planned.append({"id": movie.id, "title": movie.title, "runtime": movie.runtime,
+                                   "watched_in_period": any(m.id == movie.id for m in movies)})
+        if len(recent_planned) >= 6:
+            break
+    avg = round(total_minutes / len(movies)) if movies else None
+    profile = db.get(Profile, profile_id)
     return {
-        "period_days": 7,
+        "period_days": days,
+        "profile_id": profile_id,
+        "profile_name": decrypt_text(profile.name_enc) if profile else None,
         "movies_watched": len(movies),
         "watch_minutes": total_minutes,
         "watch_time_label": f"{total_minutes // 60}h {total_minutes % 60:02d}m",
-        "most_common_mood": effective_moods.most_common(1)[0][0] if effective_moods else None,
+        "most_common_mood": activity_moods.most_common(1)[0][0] if activity_moods else None,
+        "mood_source": "planning" if activity_moods else None,
         "favourite_genre": genre_counts.most_common(1)[0][0] if genre_counts else None,
         "average_movie_length": avg,
+        "plans_created": len(activities),
+        "planned_movie_slots": len(planned_ids),
+        "planned_minutes": sum(a.used_minutes or 0 for a in activities),
+        "favourite_planned_genre": planning_genres.most_common(1)[0][0] if planning_genres else None,
+        "recent_planned_movies": recent_planned,
+        "recent_watches": [{"id": m.id, "title": m.title, "runtime": m.runtime,
+                           "watched_at": e.created_at.replace(tzinfo=timezone.utc) if e.created_at.tzinfo is None else e.created_at}
+                           for e, m in valid_events[:6]],
     }
 
 
@@ -356,8 +392,8 @@ def list_busy_slots(
         {
             "id": row.id,
             "title": decrypt_text(row.title_enc),
-            "start_at": row.start_at.isoformat(),
-            "end_at": row.end_at.isoformat(),
+            "start_at": _utc_iso(row.start_at),
+            "end_at": _utc_iso(row.end_at),
             "source": row.source,
         }
         for row in rows
@@ -384,7 +420,7 @@ def create_busy_slot(
     db.add(row)
     db.commit()
     db.refresh(row)
-    return {"id": row.id, "title": data.title, "start_at": row.start_at.isoformat(), "end_at": row.end_at.isoformat(), "source": row.source}
+    return {"id": row.id, "title": data.title, "start_at": _utc_iso(row.start_at), "end_at": _utc_iso(row.end_at), "source": row.source}
 
 
 @router.delete("/calendar/busy-slots/{slot_id}")
@@ -410,8 +446,11 @@ def _window_bounds(data: CalendarFreeWindowRequest):
         raise HTTPException(400, "Please provide valid calendar date/time values.")
     # JavaScript getTimezoneOffset is minutes UTC - local; UTC = local + offset.
     offset = timedelta(minutes=data.timezone_offset_minutes)
-    start = datetime(day.year, day.month, day.day, sh, sm, tzinfo=timezone.utc) + offset
-    end = datetime(day.year, day.month, day.day, eh, em, tzinfo=timezone.utc) + offset
+    try:
+        start = datetime(day.year, day.month, day.day, sh, sm, tzinfo=timezone.utc) + offset
+        end = datetime(day.year, day.month, day.day, eh, em, tzinfo=timezone.utc) + offset
+    except ValueError:
+        raise HTTPException(400, "Please provide valid calendar date/time values.")
     if end <= start:
         end += timedelta(days=1)
     return start, end
@@ -447,7 +486,12 @@ async def calendar_free_windows(
 ):
     start, end = _window_bounds(data)
     row = db.query(CalendarConnection).filter(CalendarConnection.user_id == user.id, CalendarConnection.connected.is_(True)).first()
-    busy = []
+    local_rows = db.query(CalendarBusySlot).filter(
+        CalendarBusySlot.user_id == user.id,
+        CalendarBusySlot.end_at > start, CalendarBusySlot.start_at < end,
+    ).all()
+    busy = [(r.start_at.replace(tzinfo=r.start_at.tzinfo or timezone.utc),
+             r.end_at.replace(tzinfo=r.end_at.tzinfo or timezone.utc)) for r in local_rows]
     provider = "local"
     if row and row.provider == "google":
         token = await _google_token(db, row)
@@ -463,14 +507,6 @@ async def calendar_free_windows(
         for item in entries:
             busy.append((_aware(item["start"]), _aware(item["end"])))
         provider = "google"
-    else:
-        rows = db.query(CalendarBusySlot).filter(
-            CalendarBusySlot.user_id == user.id,
-            CalendarBusySlot.end_at > start,
-            CalendarBusySlot.start_at < end,
-        ).all()
-        busy = [(r.start_at.replace(tzinfo=r.start_at.tzinfo or timezone.utc), r.end_at.replace(tzinfo=r.end_at.tzinfo or timezone.utc)) for r in rows]
-
     free = _free_from_busy(start, end, busy, data.min_minutes)
     offset = timedelta(minutes=data.timezone_offset_minutes)
     windows = []

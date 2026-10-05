@@ -18,6 +18,9 @@ async function request(path,options={}){
   return data
 }
 export const api={
+  profilePhotoUrl:path=>API+path,
+  uploadProfilePhoto:(id,file)=>request('/api/family/profiles/'+id+'/photo',{method:'PUT',headers:{'Content-Type':file.type},body:file}),
+  removeProfilePhoto:id=>request('/api/family/profiles/'+id+'/photo',{method:'DELETE'}),
   me:()=>request('/api/auth/me'),
   demo:()=>request('/api/auth/demo',{method:'POST'}),
   login:body=>request('/api/auth/login',{method:'POST',body:JSON.stringify(body)}),
@@ -33,7 +36,7 @@ export const api={
   tournamentSignal:body=>request('/api/compare/tournament-signal',{method:'POST',body:JSON.stringify(body)}),
   plan:body=>request('/api/plan',{method:'POST',body:JSON.stringify(body)}),
   flag:body=>request('/api/feedback',{method:'POST',body:JSON.stringify(body)}),
-  watched:body=>request('/api/watch-events',{method:'POST',body:JSON.stringify(body)}),
+  watched:async body=>{const data=await request('/api/watch-events',{method:'POST',body:JSON.stringify(body)});window.dispatchEvent(new Event('cinesense:watch-updated'));return data},
   fairness:()=>request('/api/fairness'),
   traces:()=>request('/api/traces?limit=80'),
   savePlan:(title,plan)=>request('/api/plans/save',{method:'POST',body:JSON.stringify({title,plan})}),
@@ -68,7 +71,7 @@ export const api={
   summarize:movie_id=>request('/api/movies/summarize',{method:'POST',body:JSON.stringify({movie_id,max_sentences:3})}),
   moodCheck:body=>request('/api/planner/mood-check',{method:'POST',body:JSON.stringify(body)}),
   plannerInsights:()=>request('/api/planner/insights'),
-  weeklySummary:()=>request('/api/planner/weekly-summary'),
+  weeklySummary:(days=7)=>request('/api/planner/weekly-summary?days='+days),
   calendarStatus:()=>request('/api/calendar/status'),
   connectLocalCalendar:()=>request('/api/calendar/connect',{method:'POST',body:JSON.stringify({provider:'local'})}),
   disconnectCalendar:()=>request('/api/calendar/disconnect',{method:'POST'}),
