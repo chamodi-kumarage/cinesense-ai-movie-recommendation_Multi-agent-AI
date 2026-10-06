@@ -1,11 +1,12 @@
 from fastapi import APIRouter,Depends,HTTPException,Query
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from ..db import get_db
 from ..models import Movie,RecommendationFeedback,ProfileWatchEvent,MovieMedia,MovieProducer
 from ..schemas import WatchEventRequest,FeedbackRequest,SummarizeRequest
 from ..dependencies import get_current_user
-from ..security import encrypt_text
+from ..security import encrypt_text, decrypt_text
 from ..services.profiles import active_profile_id
 from ..agents.retrieval import movie_dict
 from ..agents.orchestrator import orchestrator
@@ -45,6 +46,19 @@ async def summarize(data:SummarizeRequest,db:Session=Depends(get_db),user=Depend
 def watch(data:WatchEventRequest,db:Session=Depends(get_db),user=Depends(get_current_user)):
     if not db.get(Movie,data.movie_id):raise HTTPException(404,"Movie not found.")
     profile_id=active_profile_id(db,user)
+    # Repeated "Mark as watched" clicks must not inflate today's totals.
+    if data.watched:
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        existing = db.query(ProfileWatchEvent).filter(
+            ProfileWatchEvent.user_id == user.id, ProfileWatchEvent.profile_id == profile_id,
+            ProfileWatchEvent.watched.is_(True), ProfileWatchEvent.created_at >= today,
+        ).all()
+        for event in existing:
+            if decrypt_text(event.movie_id_enc) == str(data.movie_id):
+                if data.rating is not None:
+                    event.rating_enc = encrypt_text(str(data.rating)); db.commit()
+                return {"ok": True, "profile_id": profile_id, "already_recorded": True,
+                        "watch_history_encrypted": True, "rating_encrypted": bool(event.rating_enc)}
     db.add(ProfileWatchEvent(user_id=user.id,profile_id=profile_id,movie_id_enc=encrypt_text(str(data.movie_id)),rating_enc=encrypt_text(str(data.rating)) if data.rating is not None else "",watched=data.watched))
     db.commit();return {"ok":True,"profile_id":profile_id,"watch_history_encrypted":True,"rating_encrypted":data.rating is not None}
 

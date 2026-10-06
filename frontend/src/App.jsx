@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
+import UserCalendar, { localDateKey } from './UserCalendar'
 
 const MOODS = ['Happy', 'Relaxed', 'Sad/Cathartic', 'Thrilled', 'Romantic', 'Nostalgic']
 const GENRES = ['Comedy','Drama','Thriller','Romance','Science Fiction','Animation','Adventure','Mystery']
@@ -63,6 +64,14 @@ function Poster({ movie, compact = false }) {
 
 function MovieCard({ movie, selected, onCompare, onNeedAuth, user, onOpen }) {
   const [flagged, setFlagged] = useState(false)
+  const [watched, setWatched] = useState(false)
+  const [watchBusy, setWatchBusy] = useState(false)
+  const [watchError, setWatchError] = useState('')
+  useEffect(()=>{
+    const reset=()=>{setWatched(false);setWatchError('')}
+    reset();window.addEventListener('cinesense:profile-changed',reset)
+    return ()=>window.removeEventListener('cinesense:profile-changed',reset)
+  },[user?.id,movie.id])
 
   const markWatched = async () => {
     if (!user) {
@@ -70,10 +79,12 @@ function MovieCard({ movie, selected, onCompare, onNeedAuth, user, onOpen }) {
       return
     }
     try {
+      setWatchBusy(true);setWatchError('')
       await api.watched({ movie_id: movie.id, watched: true, rating: null })
+      setWatched(true)
     } catch (e) {
-      console.warn(e)
-    }
+      setWatchError(e.message)
+    } finally { setWatchBusy(false) }
   }
 
   const flag = async () => {
@@ -106,8 +117,9 @@ function MovieCard({ movie, selected, onCompare, onNeedAuth, user, onOpen }) {
       </div>
 
       <div className="movie-hover-panel">
+        {watchError&&<p className="field-error" role="alert">{watchError}</p>}
         <div className="card-actions">
-          <button title="Mark as watched" onClick={e => { e.stopPropagation(); markWatched() }}>▶</button>
+          <button title={watched?'Recorded as watched':'Mark as watched'} aria-label={watched?'Recorded as watched':'Mark as watched'} disabled={watchBusy||watched} onClick={e => { e.stopPropagation(); markWatched() }}>{watchBusy?'…':watched?'✓':'▶'}</button>
           <button
             className={selected ? 'selected-btn' : ''}
             title="Add to comparison"
@@ -177,7 +189,8 @@ function MovieDetailModal({ movie, open, onClose, onCompare, onFindSimilar, sele
   const summarize = async () => {
     if (!user) { onNeedAuth(); return }
     setBusy(true)
-    try {
+    try 
+    {
       const result = await api.summarize(movie.id)
       setSummary(result.summary || movie.overview)
     } catch {
@@ -695,11 +708,21 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
   const [busy, setBusy] = useState(false)
   const [insights, setInsights] = useState(null)
   const [weekly, setWeekly] = useState(null)
+  const [summaryDays, setSummaryDays] = useState(7)
+  const [personalLoading, setPersonalLoading] = useState(false)
+  const [personalError, setPersonalError] = useState('')
+  const [watchNotice, setWatchNotice] = useState('')
+  const [watchingId, setWatchingId] = useState(null)
+  const personalRequest = useRef(0)
   const [calendar, setCalendar] = useState(null)
   const [slots, setSlots] = useState([])
   const [windows, setWindows] = useState([])
   const [selectedWindow, setSelectedWindow] = useState(null)
   const [calendarMessage, setCalendarMessage] = useState('')
+  const [calendarError, setCalendarError] = useState('')
+  const [calendarLoading, setCalendarLoading] = useState(false)
+  const [calendarBusy, setCalendarBusy] = useState(false)
+  const [calendarDate, setCalendarDate] = useState(()=>localDateKey(new Date()))
   const [reminderMinutes, setReminderMinutes] = useState(15)
   const [slotForm, setSlotForm] = useState({ title:'Busy', start_at:'', end_at:'' })
 
@@ -708,23 +731,47 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
 
   const refreshPersonal = async () => {
     if (!user) return
-    const [i,w,c] = await Promise.allSettled([api.plannerInsights(), api.weeklySummary(), api.calendarStatus()])
-    if (i.status === 'fulfilled') setInsights(i.value)
-    if (w.status === 'fulfilled') setWeekly(w.value)
+    const requestId=++personalRequest.current
+    setPersonalLoading(true);setPersonalError('')
+    const [i,w,c] = await Promise.allSettled([api.plannerInsights(), api.weeklySummary(summaryDays), api.calendarStatus()])
+    if(requestId!==personalRequest.current)return
+    if (i.status === 'fulfilled') setInsights(i.value); else setInsights(null)
+    if (w.status === 'fulfilled') setWeekly(w.value); else setWeekly(null)
+    if(i.status==='rejected'||w.status==='rejected')setPersonalError((w.status==='rejected'?w.reason:i.reason)?.message||'Unable to load your insights. Please try again.')
     if (c.status === 'fulfilled') setCalendar(c.value)
+    setPersonalLoading(false)
+  }
+  const recordWatched=async movie=>{
+    setWatchingId(movie.id);setWatchNotice('')
+    try{
+      const response=await api.watched({movie_id:movie.id,watched:true,rating:null})
+      setWatchNotice(response.already_recorded?movie.title+' is already recorded today.':movie.title+' recorded as watched for your active profile.')
+    }catch(e){setWatchNotice(e.message)}finally{setWatchingId(null)}
   }
 
   const refreshSlots = async () => {
     if (!user) return
-    try { setSlots(await api.calendarBusySlots()) } catch { setSlots([]) }
+    setCalendarLoading(true);setCalendarError('')
+    try { setSlots(await api.calendarBusySlots()) } catch(e) { setCalendarError(e.message) }
+    finally { setCalendarLoading(false) }
   }
 
   useEffect(() => {
+    setWeekly(null);setInsights(null);setWatchNotice('')
     if (open && user) {
       refreshPersonal()
       refreshSlots()
     }
-  }, [open, user?.id])
+    const watchUpdated=()=>{if(open&&user)refreshPersonal()}
+    const profileChanged=()=>{setWeekly(null);setInsights(null);setResult(null);setWatchNotice('');if(open&&user)refreshPersonal()}
+    window.addEventListener('cinesense:watch-updated',watchUpdated)
+    window.addEventListener('cinesense:profile-changed',profileChanged)
+    return ()=>{
+      personalRequest.current++
+      window.removeEventListener('cinesense:watch-updated',watchUpdated)
+      window.removeEventListener('cinesense:profile-changed',profileChanged)
+    }
+  }, [open, user?.id, summaryDays])
 
   const checkMood = async (selectedMood = null) => {
     if (!user) { onNeedAuth(); return }
@@ -802,32 +849,61 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
 
   const addBusy = async () => {
     if (!user) { onNeedAuth(); return }
-    if (!slotForm.start_at || !slotForm.end_at) { setCalendarMessage('Choose both a start and end time.'); return }
+    setCalendarError('');setCalendarMessage('')
+    if (!slotForm.title.trim()) { setCalendarError('Enter an event title.'); return }
+    if (!slotForm.start_at || !slotForm.end_at) { setCalendarError('Choose both a start and end time.'); return }
+    const start=new Date(slotForm.start_at),end=new Date(slotForm.end_at)
+    if(!Number.isFinite(start.getTime())||!Number.isFinite(end.getTime())||end<=start){setCalendarError('End time must be after start time.');return}
+    setCalendarBusy(true)
     try {
       await api.addCalendarBusySlot({
         ...slotForm,
-        start_at:new Date(slotForm.start_at).toISOString(),
-        end_at:new Date(slotForm.end_at).toISOString()
+        title:slotForm.title.trim(),
+        start_at:start.toISOString(),
+        end_at:end.toISOString()
       })
+      setCalendarDate(localDateKey(start));setWindows([]);setSelectedWindow(null)
       setSlotForm({ title:'Busy', start_at:'', end_at:'' })
       setCalendarMessage('Busy time added. CineSense will avoid it when finding free windows.')
-      refreshSlots()
-    } catch (e) { setCalendarMessage(e.message) }
+      await refreshSlots()
+    } catch (e) { setCalendarError(e.message) } finally { setCalendarBusy(false) }
+  }
+
+  const selectCalendarDate=date=>{
+    setCalendarDate(date);setWindows([]);setSelectedWindow(null)
+    setSlotForm(current=>({...current,start_at:date+'T18:00',end_at:date+'T19:00'}))
+  }
+  const removeCalendarEvent=async id=>{
+    setCalendarBusy(true);setCalendarError('');setCalendarMessage('')
+    try{
+      await api.deleteCalendarBusySlot(id)
+      setWindows([]);setSelectedWindow(null)
+      await refreshSlots();setCalendarMessage('Calendar event removed.')
+    }catch(e){setCalendarError(e.message)}finally{setCalendarBusy(false)}
+  }
+  const disconnectCalendar=async()=>{
+    setCalendarBusy(true);setCalendarError('')
+    try{
+      await api.disconnectCalendar()
+      setCalendar({...calendar,connected:false,provider:null});setWindows([])
+      setCalendarMessage('Calendar disconnected. Your saved CineSense events remain available.')
+    }catch(e){setCalendarError(e.message)}finally{setCalendarBusy(false)}
   }
 
   const findWindows = async () => {
     if (!user) { onNeedAuth(); return }
+    setCalendarBusy(true);setCalendarError('');setWindows([])
     try {
       const response = await api.calendarFreeWindows({
-        date: today,
+        date: calendarDate,
         window_start:'18:00',
         window_end:'23:59',
         min_minutes:30,
-        timezone_offset_minutes:new Date().getTimezoneOffset()
+        timezone_offset_minutes:new Date(calendarDate+'T18:00').getTimezoneOffset()
       })
       setWindows(response.windows || [])
-      setCalendarMessage(response.windows?.length ? 'Here are your free windows for tonight.' : 'No free evening window of at least 30 minutes was found.')
-    } catch (e) { setCalendarMessage(e.message) }
+      setCalendarMessage(response.windows?.length ? 'Free evening windows for '+calendarDate+'.' : 'No free evening window of at least 30 minutes was found on '+calendarDate+'.')
+    } catch (e) { setCalendarError(e.message) } finally { setCalendarBusy(false) }
   }
 
   const useWindow = windowItem => {
@@ -847,7 +923,7 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
     let start = null
     if (selectedWindow) start = new Date(selectedWindow.start_at)
     if (!start || Number.isNaN(start.getTime())) {
-      if (result?.suggested_start) start = new Date(`${ymd}T${result.suggested_start}:00`)
+      if (result?.suggested_start) start = new Date(`${calendarDate}T${result.suggested_start}:00`)
       else start = new Date(Date.now() + 5 * 60000)
     }
     const end = new Date(start.getTime() + Number(result?.used_minutes || 0) * 60000)
@@ -936,7 +1012,8 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
           {result?.movies && result.movies.length > 0 && <>
             <div className="plan-intro"><div className="overline">{result.type==='double'?'DOUBLE FEATURE':'SMART MOVIE PLAN'}</div><p>{result.message}</p>{result.why_this_plan&&<div className="personal-why"><b>Why this plan fits you</b><p>{result.why_this_plan}</p></div>}</div>
             {result.suggested_start && <div className="schedule-card"><div><small>Suggested start</small><strong>{result.suggested_start}</strong></div><div><small>Movie time ends</small><strong>{result.planned_finish || result.finish_by}</strong></div><div><small>Finish by</small><strong>{result.finish_by}</strong></div><div><small>Buffer</small><strong>{result.buffer_minutes} min</strong></div></div>}
-            <div className="plan-list">{result.movies.map((movie,i)=><div className="plan-item" key={movie.id}><span className="plan-number">{i+1}</span><Poster movie={movie} compact/><div><strong>{movie.title}</strong><small>{movie.runtime} min · ★ {movie.rating}</small><p>{movie.personal_reason || movie.reason}</p></div></div>)}</div>
+            <div className="plan-list">{result.movies.map((movie,i)=><div className="plan-item" key={movie.id}><span className="plan-number">{i+1}</span><Poster movie={movie} compact/><div><strong>{movie.title}</strong><small>{movie.runtime} min · ★ {movie.rating}</small><p>{movie.personal_reason || movie.reason}</p><button className="btn-secondary" disabled={watchingId!==null} onClick={()=>recordWatched(movie)}>{watchingId===movie.id?'Saving...':'Mark as watched'}</button></div></div>)}</div>
+            {watchNotice&&<p role="status" className="helper-success">{watchNotice}</p>}
             <div className="stat-line"><span><b>{result.used_minutes}</b> min watch time</span><span><b>{result.remaining_minutes}</b> min spare</span><span><b>{result.buffer_minutes || 0}</b> min buffer</span></div>
             <div className="plan-calendar-actions"><label>Reminder<select value={reminderMinutes} onChange={e=>setReminderMinutes(e.target.value)}><option value={0}>None</option><option value={5}>5 min</option><option value={15}>15 min</option><option value={30}>30 min</option><option value={60}>1 hour</option></select></label><div className="plan-actions">{user?.plan!=='free'&&<button className="btn-secondary" onClick={save}>Save plan</button>}<button className="btn-primary" onClick={addToCalendar}>Add to Calendar</button></div></div>
             {calendarMessage && <p className="helper-success">{calendarMessage}</p>}
@@ -946,31 +1023,42 @@ function PlannerModal({ open, onClose, user, onNeedAuth }) {
       </div>}
 
       {tab === 'insights' && <div className="insights-dashboard">
-        <div className="insight-heading"><div><div className="section-kicker">4 · Mood history & personal insights</div><h3>Your CineSense patterns</h3></div><button className="btn-secondary" onClick={refreshPersonal}>Refresh</button></div>
-        <div className="weekly-summary-grid">
-          <div><span>🎬</span><strong>{weekly?.movies_watched ?? 0}</strong><small>Movies watched</small></div>
-          <div><span>⏱</span><strong>{weekly?.watch_time_label || '0h 00m'}</strong><small>Watch time</small></div>
-          <div><span>🙂</span><strong>{weekly?.most_common_mood || '—'}</strong><small>Most common mood</small></div>
-          <div><span>🍿</span><strong>{weekly?.favourite_genre || '—'}</strong><small>Favourite genre</small></div>
-          <div><span>◷</span><strong>{weekly?.average_movie_length || 0} min</strong><small>Average movie length</small></div>
-        </div>
-        <div className="insight-cards">{(insights?.insights || ['Create a few plans to unlock personalised patterns.']).map((text,i)=><article key={i}><span>✦</span><p>{text}</p></article>)}</div>
-        <div className="insight-note"><b>Weekly Mood & Watch Summary</b><p>These insights use your own saved planner activity and watched titles. They are designed to help you notice patterns, not to label how you feel.</p></div>
+        <div className="insight-heading"><div><div className="section-kicker">Mood history & personal insights</div><h3>Your CineSense patterns</h3><p className="muted">{weekly?.profile_name?weekly.profile_name+' | ':''}{summaryDays===0?'All recorded activity':'Last '+summaryDays+' days'}</p></div><div className="insight-filters"><select aria-label="Insights period" value={summaryDays} onChange={e=>setSummaryDays(Number(e.target.value))}><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={0}>All time</option></select><button className="btn-secondary" disabled={personalLoading} onClick={refreshPersonal}>{personalLoading?'Loading...':'Refresh'}</button></div></div>
+        {!user&&<div className="empty-card"><h3>Sign in to see your patterns</h3><button className="btn-primary" onClick={onNeedAuth}>Sign in</button></div>}
+        {personalError&&<div className="error-box" role="alert">{personalError} Select Refresh to try again.</div>}
+        {user&&<>
+          <div className="weekly-summary-grid" aria-busy={personalLoading}>
+            <div><h4>Movies watched</h4><strong>{weekly?.movies_watched ?? 'Not available'}</strong><small>Movies recorded as watched</small></div>
+            <div><h4>Watch time</h4><strong>{weekly?.watch_time_label ?? 'Not available'}</strong><small>Recorded watch time</small></div>
+            <div><h4>Planning mood</h4><strong>{weekly?.most_common_mood || 'No mood recorded'}</strong><small>Most common planning mood</small></div>
+            <div><h4>Favourite genre</h4><strong>{weekly?.favourite_genre || 'No watched history'}</strong><small>Favourite watched genre</small></div>
+            <div><h4>Average length</h4><strong>{weekly?.average_movie_length!=null?weekly.average_movie_length+' min':'No watched history'}</strong><small>Average watched movie length</small></div>
+          </div>
+          {weekly&&<>
+            <div className="planning-summary"><div><strong>{weekly.plans_created}</strong><span>Plans created</span></div><div><strong>{weekly.planned_movie_slots}</strong><span>Movie slots planned</span></div><div><strong>{Math.floor(weekly.planned_minutes/60)}h {String(weekly.planned_minutes%60).padStart(2,'0')}m</strong><span>Planned movie time</span></div><div><strong>{weekly.favourite_planned_genre||'No genre recorded'}</strong><span>Favourite planned genre</span></div></div>
+            {!weekly.movies_watched&&<div className="insight-note"><b>No watched movies recorded {summaryDays===0?'yet':'in the last '+summaryDays+' days'}</b><p>Creating or saving a plan does not record a movie as watched. After you finish a movie, select Mark as watched below or on its catalogue card. These statistics belong to your active profile.</p></div>}
+            {weekly.recent_planned_movies?.length>0&&<section className="insight-note"><b>Recently planned movies</b><div className="insight-movie-list">{weekly.recent_planned_movies.map(movie=><div key={movie.id}><span><strong>{movie.title}</strong><small>{movie.runtime} min</small></span><button className="btn-secondary" disabled={watchingId!==null||movie.watched_in_period} onClick={()=>recordWatched(movie)}>{movie.watched_in_period?'Recorded as watched':watchingId===movie.id?'Saving...':'Mark as watched'}</button></div>)}</div></section>}
+            {weekly.recent_watches?.length>0&&<section className="insight-note"><b>Recent watched history</b><div className="insight-movie-list">{weekly.recent_watches.map((movie,i)=><div key={String(movie.id)+'-'+i}><span><strong>{movie.title}</strong><small>{movie.runtime} min | {new Date(movie.watched_at).toLocaleDateString()}</small></span><span>Watched</span></div>)}</div></section>}
+          </>}
+          {watchNotice&&<p className="helper-success" role="status">{watchNotice}</p>}
+          <div className="insight-cards">{(insights?.insights || []).map((text,i)=><article key={i}><span>Insight</span><p>{text}</p></article>)}</div>
+          <div className="insight-note"><b>Your recorded activity</b><p>Watch totals use movies you marked as watched in the selected period. Planning totals use plans you created. Mood reflects your planning choices, not a diagnosis. Pattern notes consider your recent 120 days of planning.</p></div>
+        </>}
       </div>}
 
       {tab === 'calendar' && <div className="calendar-dashboard">
         <div className="calendar-connect-card">
           <div><div className="section-kicker">6 · Calendar-aware planning</div><h3>{calendar?.connected ? `${calendar.provider==='google'?'Google':'CineSense'} Calendar connected` : 'Connect a calendar'}</h3><p>Let CineSense find evening gaps and turn them into a watch plan. Google Calendar works when OAuth credentials are configured; the built-in CineSense Calendar works immediately for the university demo.</p></div>
-          <div className="calendar-connect-actions">{!calendar?.connected&&<button className="btn-primary" onClick={connectLocal}>Connect CineSense Calendar</button>}{calendar?.provider!=='google'&&<button className="btn-secondary" onClick={connectGoogle}>{calendar?.google_available?'Connect Google Calendar':'Google setup needed'}</button>}{calendar?.connected&&<button className="btn-secondary" onClick={async()=>{await api.disconnectCalendar();setCalendar({...calendar,connected:false,provider:null});setCalendarMessage('Calendar disconnected.')}}>Disconnect</button>}</div>
+          <div className="calendar-connect-actions">{!calendar?.connected&&<button className="btn-primary" onClick={connectLocal}>Connect CineSense Calendar</button>}{calendar?.google_available&&calendar?.provider!=='google'&&<button className="btn-secondary" onClick={connectGoogle}>Connect Google Calendar</button>}{calendar?.connected&&<button className="btn-secondary" onClick={async()=>{await api.disconnectCalendar();setCalendar({...calendar,connected:false,provider:null});setCalendarMessage('Calendar disconnected.')}}>Disconnect</button>}</div>
         </div>
 
+        {!user&&<div className="empty-card"><h3>Sign in to save your calendar</h3><button className="btn-primary" onClick={onNeedAuth}>Sign in</button></div>}
+        {user&&<UserCalendar events={slots} selectedDate={calendarDate} onSelect={selectCalendarDate} onRemove={removeCalendarEvent} loading={calendarLoading} error={calendarError} busy={calendarBusy} onRefresh={refreshSlots}/>}
         <div className="calendar-two-col">
-          <section className="calendar-panel"><h4>Add a busy time</h4><p>Use this for classes, work, dinner, or anything CineSense should avoid.</p><input value={slotForm.title} onChange={e=>setSlotForm({...slotForm,title:e.target.value})} placeholder="What are you doing?"/><label>Start<input type="datetime-local" value={slotForm.start_at} onChange={e=>setSlotForm({...slotForm,start_at:e.target.value})}/></label><label>End<input type="datetime-local" value={slotForm.end_at} onChange={e=>setSlotForm({...slotForm,end_at:e.target.value})}/></label><button className="btn-secondary full" onClick={addBusy}>Add busy time</button></section>
-          <section className="calendar-panel"><h4>Find free time tonight</h4><p>Search 6:00 PM–11:59 PM for gaps of at least 30 minutes.</p><button className="btn-primary full" onClick={findWindows}>Find my free windows</button><div className="free-window-list">{windows.map((w,i)=><button key={i} onClick={()=>useWindow(w)}><strong>{w.label}</strong><small>Use this window for a watch plan →</small></button>)}</div></section>
+          <section className="calendar-panel"><h4>Add a busy time</h4><p>Choose a day above, then mark classes, work, dinner or other commitments.</p><label>Event title<input value={slotForm.title} onChange={e=>setSlotForm({...slotForm,title:e.target.value})} maxLength={120} placeholder="What are you doing?"/></label><label>Start<input type="datetime-local" value={slotForm.start_at} onChange={e=>setSlotForm({...slotForm,start_at:e.target.value})}/></label><label>End<input type="datetime-local" value={slotForm.end_at} onChange={e=>setSlotForm({...slotForm,end_at:e.target.value})}/></label><button className="btn-secondary full" disabled={calendarBusy} onClick={addBusy}>{calendarBusy?'Please wait...':'Add busy time'}</button></section>
+          <section className="calendar-panel"><h4>Find free time on your selected day</h4><label>Date<input type="date" value={calendarDate} onChange={e=>{if(e.target.value)selectCalendarDate(e.target.value)}}/></label><p>Search 6:00 PM - 11:59 PM for gaps of at least 30 minutes. Your saved busy times and watch plans are excluded.</p><button className="btn-primary full" disabled={calendarBusy} onClick={findWindows}>{calendarBusy?'Please wait...':'Find my free windows'}</button><div className="free-window-list">{windows.map((w,i)=><button key={i} onClick={()=>useWindow(w)}><strong>{w.label}</strong><small>Use this window for a watch plan</small></button>)}</div></section>
         </div>
-
-        {slots.length>0&&<section className="calendar-slot-list"><div className="label-between"><h4>Saved calendar times</h4><span>{slots.length} items</span></div>{slots.slice(0,8).map(slot=><div key={slot.id}><span><b>{slot.title}</b><small>{new Date(slot.start_at).toLocaleString()} – {new Date(slot.end_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</small></span><button onClick={async()=>{await api.deleteCalendarBusySlot(slot.id);refreshSlots()}}>Remove</button></div>)}</section>}
-        {calendarMessage&&<p className="helper-success calendar-message">{calendarMessage}</p>}
+        {calendarMessage&&<p className="helper-success calendar-message" role="status">{calendarMessage}</p>}
       </div>}
     </Modal>
   )
@@ -1100,24 +1188,42 @@ function FamilyModal({ open, onClose, user }) {
   const [notice,setNotice]=useState('')
   const [household,setHousehold]=useState(null)
   const [inviteEmail,setInviteEmail]=useState('')
-  const [inviteRole,setInviteRole]=useState('member')
   const [inviteLink,setInviteLink]=useState('')
 
   const load=async()=>{
     if(!open||!user)return
-    try{const [rows,home]=await Promise.all([api.profiles(),api.familyHousehold()]);setProfiles(rows);setHousehold(home);setError('')}catch(e){setError(e.message)}
+    try{const rows=await api.profiles();setProfiles(rows);setSelected(ids=>ids.filter(id=>rows.some(p=>p.id===id)));setError('')}catch(e){setError(e.message)}
   }
   useEffect(()=>{if(open){load();setGroup(null);setComparison(null);setResult(null);setCompareIds([]);setVotes({});setHistory(null);setNotice('');const token=new URLSearchParams(window.location.search).get('family_invite');if(token){api.acceptFamilyInvite(token).then(r=>{setNotice(r.message);window.history.replaceState({},'',window.location.pathname);load()}).catch(e=>setError(e.message))}}},[open,user?.id])
 
   const inviteMember=async()=>{
     if(!inviteEmail.trim()){setError('Enter the family member email address.');return}
-    setBusy(true);try{const r=await api.inviteFamilyMember({email:inviteEmail.trim(),role:inviteRole});setInviteLink(`${window.location.origin}${r.invite_path}`);setInviteEmail('');setNotice('Invitation created. Copy and share the link below.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}
+    setBusy(true);try{const r=await api.inviteFamilyMember({email:inviteEmail.trim(),role:'member'});setInviteLink(`${window.location.origin}${r.invite_path}`);setInviteEmail('');setNotice('Invitation created. Copy and share the link below.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}
   }
   const changeMemberRole=async(id,role)=>{setBusy(true);try{await api.updateFamilyMemberRole(id,role);setNotice('Family member role updated.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const removeMember=async id=>{if(!confirm('Remove this user from the Family plan?'))return;setBusy(true);try{await api.removeFamilyMember(id);setNotice('Family member removed.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const copyInvite=async()=>{try{await navigator.clipboard.writeText(inviteLink);setNotice('Invite link copied.')}catch{setNotice('Copy the invite link shown below.')}}
 
   const toggleList=(key,value)=>setEditor(e=>({...e,[key]:e[key].includes(value)?e[key].filter(x=>x!==value):[...e[key],value]}))
+  const uploadPhoto=async(profileId,file)=>{
+    if(!file)return
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type)){setError('Choose a JPG, PNG or WebP photo.');return}
+    if(file.size>5*1024*1024){setError('Profile photos must be 5 MB or smaller.');return}
+    setBusy(true);setError('');setNotice('')
+    try{
+      const updated=await api.uploadProfilePhoto(profileId,file)
+      setProfiles(rows=>rows.map(p=>p.id===profileId?updated:p))
+      setNotice('Profile photo saved.')
+    }catch(e){setError(e.message)}finally{setBusy(false)}
+  }
+  const removePhoto=async profileId=>{
+    setBusy(true);setError('');setNotice('')
+    try{
+      const updated=await api.removeProfilePhoto(profileId)
+      setProfiles(rows=>rows.map(p=>p.id===profileId?updated:p))
+      setNotice('Profile photo removed.')
+    }catch(e){setError(e.message)}finally{setBusy(false)}
+  }
   const startNew=()=>{setEditor(emptyEditor);setHistory(null)}
   const editProfile=p=>{setEditor({id:p.id,name:p.name,preferred_genres:p.preferences?.preferred_genres||[],disliked_genres:p.preferences?.disliked_genres||[],preferred_moods:p.preferences?.preferred_moods||[]});setHistory(null)}
   const saveProfile=async()=>{
@@ -1129,13 +1235,13 @@ function FamilyModal({ open, onClose, user }) {
       setEditor(emptyEditor);setNotice(editor.id?'Profile updated.':'Profile created.');await load()
     }catch(e){setError(e.message)}finally{setBusy(false)}
   }
-  const switchTo=async id=>{setBusy(true);try{await api.switchProfile(id);setNotice('Active profile switched. Recommendations and watch history now use this profile.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
-  const remove=async id=>{if(!confirm('Delete this family profile and its private watch history?'))return;setBusy(true);try{await api.deleteProfile(id);setSelected(x=>x.filter(v=>v!==id));if(editor.id===id)setEditor(emptyEditor);await load();setNotice('Profile removed.')}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const switchTo=async id=>{setBusy(true);try{await api.switchProfile(id);window.dispatchEvent(new Event('cinesense:profile-changed'));setNotice('Active profile switched. Recommendations and watch history now use this profile.');await load()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const remove=async id=>{if(!confirm('Delete this family profile and its private watch history?'))return;setBusy(true);try{await api.deleteProfile(id);window.dispatchEvent(new Event('cinesense:profile-changed'));setSelected(x=>x.filter(v=>v!==id));if(editor.id===id)setEditor(emptyEditor);await load();setNotice('Profile removed.')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const showHistory=async p=>{setBusy(true);try{const [prefs,rows]=await Promise.all([api.profilePreferences(p.id),api.profileHistory(p.id)]);setHistory({profile:p,prefs,rows});setError('')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const toggleMember=id=>setSelected(x=>x.includes(id)?x.filter(v=>v!==id):[...x,id].slice(0,5))
 
   const createChoice=async()=>{
-    if(selected.length<2){setError('Choose at least two participating family profiles.');return}
+    if(selected.length<2){setError('Choose at least two participating family members.');return}
     setBusy(true)
     try{
       const response=await api.groupChoice({profile_ids:selected,free_minutes:Number(minutes)||180,mood:groupMood||null,request_text:requestText})
@@ -1152,32 +1258,31 @@ function FamilyModal({ open, onClose, user }) {
     setBusy(true);try{const r=await api.groupVote(group.session_id,profileId,movieId);setResult(r);setError('')}catch(e){setError(e.message)}finally{setBusy(false)}
   }
   const participants=household?.participants||[]
-  const managedIds=new Set(participants.filter(p=>p.participant_type==='managed_profile').map(p=>p.id))
-  const managedProfiles=profiles.filter(p=>managedIds.has(p.id))
 
   return <Modal open={open} onClose={onClose} title="Family profiles & group choice" eyebrow="5 PRIVATE PROFILES · CONSENSUS SCORING · HUMAN VOTING" wide>
+    {error&&!household&&<div className="error-box">{error}<button className="btn-secondary" onClick={load} disabled={busy}>Retry</button></div>}
     {user?.plan!=='family'&&!household?<div className="empty-card"><div className="big-symbol">⌂</div><h3>Family plan feature</h3><p>Upgrade to Family or accept a household invitation to use shared profiles, preferences, and group decisions.</p></div>:<>
       {error&&<div className="error-box">{error}</div>}{notice&&<div className="success-box">{notice}</div>}
       {household&&<section className="family-household family-panel">
         <div className="family-section-head"><div><span className="overline">FAMILY HOUSEHOLD</span><h3>Plan owner & members</h3><p>{household.members.length}/{household.max_members} places used · Your role: {household.current_role}</p></div>{household.current_role==='owner'&&<span className="owner-badge">Owner</span>}</div>
-        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.email}</strong><small>{m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<><select value={m.role} onChange={e=>changeMemberRole(m.id,e.target.value)} disabled={busy}><option value="member">Member</option><option value="child">Child</option></select><button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button></>:null}</div>)}</div>
-        {household.can_manage&&<div className="household-invite"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><select value={inviteRole} onChange={e=>setInviteRole(e.target.value)}><option value="member">Member</option><option value="child">Child</option></select><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Send invite</button></div>}
+        <div className="household-members">{household.members.map(m=><div className="household-member" key={m.id}><div><strong>{m.display_name||m.email}</strong><small>{m.email} | {m.role}</small></div>{m.is_owner?<span className="owner-badge">Owner</span>:household.can_manage?<button className="danger-link" onClick={()=>removeMember(m.id)} disabled={busy}>Remove</button>:null}</div>)}</div>
+        {household.can_manage&&<div className="household-invite account-only"><input type="email" value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)} placeholder="family.member@example.com"/><button className="btn-primary" onClick={inviteMember} disabled={busy||household.members.length+household.pending_invites.length>=household.max_members}>Create invite link</button></div>}
         {inviteLink&&<div className="invite-link"><code>{inviteLink}</code><button className="btn-secondary" onClick={copyInvite}>Copy link</button></div>}
         {!!household.pending_invites.length&&<div className="pending-invites"><strong>Pending invitations</strong>{household.pending_invites.map(i=><span key={i.id}>{i.email} · expires {new Date(i.expires_at).toLocaleDateString()}</span>)}</div>}
       </section>}
-      <div className="family-layout">
+      <div className="family-layout family-profiles-layout">
         <section className="family-panel">
-          <div className="family-section-head"><div><span className="overline">01 · MANAGED PROFILES</span><h3>Children & guests</h3><p>Real members use their own accounts. Profiles are only for children or guests without a login.</p></div>{household?.can_manage&&<button className="btn-secondary" onClick={startNew}>+ Child / guest</button>}</div>
-          {!household?.can_manage&&<div className="account-profile-note"><strong>Your account is your profile</strong><p>Your preferences, mood history, watch history, and votes stay attached to your own CineSense login. You do not need another profile.</p></div>}
-          {household?.can_manage&&<><div className="profile-grid enhanced">{managedProfiles.map(p=><article className={`family-profile ${p.active?'active':''}`} key={p.id}>
-            <button className="profile-main" onClick={()=>switchTo(p.id)} disabled={busy}><span>{p.name?.[0]?.toUpperCase()||'P'}</span><strong>{p.name}</strong><small>{p.active?'✓ Active profile':'Use this profile'}</small></button>
-            <div className="profile-mini-stats"><span>{p.history_count||0} watched</span><span>{p.preferences?.preferred_genres?.slice(0,2).join(' · ')||'No saved genres'}</span></div>
-            <div className="profile-actions"><button onClick={()=>editProfile(p)}>Edit</button><button onClick={()=>showHistory(p)}>History</button><button className="danger-link" onClick={()=>remove(p.id)}>Delete</button></div>
-          </article>)}{!managedProfiles.length&&<div className="empty-managed-profile"><span>Optional</span><p>Add a child or guest only when they will not have their own CineSense login.</p></div>}</div>
+          <div className="family-section-head"><div><span className="overline">01 · PROFILES</span><h3>Who is watching?</h3><p>Each profile has separate preferences and encrypted movie history.</p></div><button className="btn-secondary" onClick={startNew}>+ New profile</button></div>
+          <div className="profile-grid enhanced">{profiles.map(p=><article className={`family-profile ${p.active?'active':''}`} key={p.id}>
+            <button className="profile-main" onClick={()=>switchTo(p.id)} disabled={busy}><span className="profile-avatar">{p.photo_url?<img src={api.profilePhotoUrl(p.photo_url)} alt={p.name+' profile photo'}/>:p.name?.[0]?.toUpperCase()||'P'}</span><strong>{p.name}</strong><small>{p.active?'✓ Active profile':'Use this profile'}</small></button>
+            <div className="profile-photo-actions"><label className="photo-upload-button">{p.photo_url?'Change photo':'Add photo'}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={e=>{uploadPhoto(p.id,e.target.files?.[0]);e.target.value=''}}/></label>{p.photo_url&&<button disabled={busy} onClick={()=>removePhoto(p.id)}>Remove photo</button>}</div><div className="profile-mini-stats"><span>{p.history_count||0} watched</span><span>{p.preferences?.preferred_genres?.slice(0,2).join(' · ')||'No saved genres'}</span></div>
+            <label className="member-check"><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/> Include in group</label>
+            <div className="profile-actions"><button onClick={()=>editProfile(p)}>Edit</button><button onClick={()=>showHistory(p)}>History</button>{profiles.length>1&&<button className="danger-link" onClick={()=>remove(p.id)}>Delete</button>}</div>
+          </article>)}</div>
 
           <div className="profile-editor">
             <div className="family-section-head compact"><div><span className="overline">PROFILE SETTINGS</span><h4>{editor.id?'Edit profile':'Create profile'}</h4></div></div>
-            <label>Display name<input value={editor.name} onChange={e=>setEditor({...editor,name:e.target.value})} maxLength={50} placeholder="e.g. Kids, Guest"/></label>
+            <label>Display name<input value={editor.name} onChange={e=>setEditor({...editor,name:e.target.value})} maxLength={50} placeholder="e.g. Mother, Father, Theekshana"/></label>
             <div className="preference-block"><strong>Preferred genres</strong><div className="choice-chips">{genreOptions.map(g=><button type="button" className={editor.preferred_genres.includes(g)?'active':''} onClick={()=>toggleList('preferred_genres',g)} key={g}>{g}</button>)}</div></div>
             <div className="preference-block"><strong>Disliked genres</strong><div className="choice-chips danger">{genreOptions.map(g=><button type="button" className={editor.disliked_genres.includes(g)?'active':''} onClick={()=>toggleList('disliked_genres',g)} key={g}>{g}</button>)}</div></div>
             <div className="preference-block"><strong>Favourite moods</strong><div className="choice-chips">{moodOptions.map(m=><button type="button" className={editor.preferred_moods.includes(m)?'active':''} onClick={()=>toggleList('preferred_moods',m)} key={m}>{m}</button>)}</div></div>
@@ -1185,13 +1290,12 @@ function FamilyModal({ open, onClose, user }) {
           </div>
 
           {history&&<div className="profile-history-card"><div className="family-section-head compact"><div><span className="overline">PRIVATE HISTORY</span><h4>{history.profile.name}</h4></div><button className="panel-close" onClick={()=>setHistory(null)}>×</button></div><p>Learned genres: {history.prefs.learned_genres?.join(', ')||'Not enough history yet'} · Learned moods: {history.prefs.learned_moods?.join(', ')||'Not enough history yet'}</p><div className="history-list">{history.rows.slice(0,8).map((x,i)=><div key={`${x.movie.id}-${i}`}><strong>{x.movie.title}</strong><span>{x.rating?`${x.rating}/5`:'Watched'}</span></div>)}{!history.rows.length&&<small>No watched movies recorded for this profile yet.</small>}</div></div>}
-          </>}
         </section>
 
+
         <section className="family-panel group-panel">
-          <div className="family-section-head"><div><span className="overline">02 · GROUP SESSION</span><h3>Who is watching?</h3><p>Choose from one combined list of real accounts and optional managed profiles.</p></div></div>
-          <div className="participant-list">{participants.map(p=><label className={`participant-choice ${selected.includes(p.id)?'selected':''}`} key={p.id}><input type="checkbox" checked={selected.includes(p.id)} onChange={()=>toggleMember(p.id)}/><span>{p.name?.[0]?.toUpperCase()||'P'}</span><div><strong>{p.name}</strong><small>{p.participant_type==='account'?`${p.role} account`:p.subtitle}</small></div></label>)}</div>
-          <div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
+          <div className="family-section-head"><div><span className="overline">01 · GROUP SESSION</span><h3>Who is watching?</h3><p>Select only the people watching tonight. CineSense scores compromise for every selected profile.</p></div></div>
+<div className="group-controls"><label>What do you want tonight?<input value={requestText} onChange={e=>setRequestText(e.target.value)} placeholder="Something funny but not too intense"/></label><div className="two-col"><label>Mood<select value={groupMood} onChange={e=>setGroupMood(e.target.value)}><option value="">Use family pattern</option>{moodOptions.map(m=><option key={m}>{m}</option>)}</select></label><label>Available time<input type="number" min="30" max="600" value={minutes} onChange={e=>setMinutes(e.target.value)}/><small>minutes</small></label></div><button className="btn-primary full" disabled={busy||selected.length<2} onClick={createChoice}>Find group recommendations for {selected.length||0} participants</button></div>
 
           {group?.results?.length>0&&<div className="group-results advanced"><div className="family-section-head compact"><div><span className="overline">03 · CONSENSUS RESULTS</span><h4>Best compromises</h4></div><span className="session-pill">Session {group.session_id.slice(0,7)}</span></div>{group.results.slice(0,8).map(m=><div className="group-pick scored" key={m.id}><Poster movie={m} compact/><div className="group-pick-main"><div className="group-pick-title"><strong>{m.title}</strong><b>{m.group_score}% consensus</b></div><p>{m.reason}</p><div className="member-score-row">{m.consensus?.member_scores?.map(ms=><span className={ms.conflicts?.length?'conflict':ms.score>=60?'good':''} key={ms.profile_id}>{ms.profile_name} {Math.round(ms.score)}%</span>)}</div></div><label className="compare-check"><input type="checkbox" checked={compareIds.includes(m.id)} onChange={()=>toggleCompare(m.id)}/> Compare</label></div>)}<button className="btn-secondary full" disabled={compareIds.length<2||compareIds.length>4||busy} onClick={compare}>Compare selected ({compareIds.length}/4)</button></div>}
 

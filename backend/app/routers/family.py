@@ -1,14 +1,17 @@
 import hashlib, json, secrets, uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from io import BytesIO
+import warnings
+from PIL import Image, ImageOps, UnidentifiedImageError
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from ..db import get_db
 from ..dependencies import get_current_user
 from ..models import (
     Profile, ActiveProfile, ProfileWatchEvent, ProfilePreference, Movie,
-    GroupSession, GroupVote, PlannerActivity, User, FamilyGroup, FamilyMember, FamilyInvite,
+    GroupSession, GroupVote, PlannerActivity, User, FamilyGroup, FamilyMember, FamilyInvite, ProfilePhoto,
 )
 from ..schemas import (
     ProfileCreateRequest, ProfileUpdateRequest, ProfileSwitchRequest,
@@ -72,14 +75,13 @@ def family_owner_id(db: Session, user) -> int:
 def allowed_family_profiles(db: Session, user) -> list[Profile]:
     group, _ = family_access(db, user)
     members = db.query(FamilyMember).filter(FamilyMember.family_group_id == group.id, FamilyMember.status == "active").all()
-    account_profile_ids = []
+    account_profile_ids = [p.id for p in db.query(Profile).filter(Profile.user_id == user.id).all()]
     for member in members:
         account = db.get(User, member.user_id)
         if account:
             account_profile_ids.append(ensure_default_profile(db, account).id)
-    managed = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or [-1])).all()
     account_profiles = db.query(Profile).filter(Profile.id.in_(account_profile_ids or [-1])).all()
-    return account_profiles + managed
+    return account_profiles
 
 
 def require_family(user, db: Session | None = None):
@@ -97,10 +99,12 @@ def household(db: Session = Depends(get_db), user=Depends(get_current_user)):
         if expires <= current: invite.status = "expired"
     db.commit()
     member_rows = [member_payload(db, m) for m in members]
-    account_profile_ids = {m["profile_id"] for m in member_rows if m["profile_id"]}
-    managed_profiles = db.query(Profile).filter(Profile.user_id == group.owner_user_id, ~Profile.id.in_(account_profile_ids or {-1})).order_by(Profile.id).all()
+    for row, member in zip(member_rows, members):
+        if member.role not in {"owner", "member"}:
+            member.role = "member"
+            row["role"] = "member"
     participants = [{"id": m["profile_id"], "name": m["display_name"] or m["email"].split("@")[0], "subtitle": m["email"], "participant_type": "account", "role": m["role"], "user_id": m["user_id"]} for m in member_rows if m["profile_id"]]
-    participants += [{"id": p.id, "name": decrypt_text(p.name_enc), "subtitle": "Managed child / guest profile", "participant_type": "managed_profile", "role": "profile", "user_id": p.user_id} for p in managed_profiles]
+    db.commit()
     return {"group_id": group.id, "owner_user_id": group.owner_user_id, "current_role": membership.role, "can_manage": membership.role == "owner", "max_members": MAX_FAMILY_PEOPLE, "members": member_rows, "participants": participants, "pending_invites": [{"id": i.id, "email": i.invited_email, "status": i.status, "expires_at": i.expires_at, "created_at": i.created_at} for i in pending if i.status == "pending"]}
 
 @router.get("/members")
@@ -122,9 +126,9 @@ def create_family_invite(data: FamilyInviteCreateRequest, db: Session = Depends(
     if existing:
         existing.status = "expired"
     raw_token = secrets.token_urlsafe(32)
-    invite = FamilyInvite(family_group_id=group.id, invited_email=email, invited_by_user_id=user.id, role=data.role, token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), status="pending", expires_at=now_utc() + timedelta(days=7))
+    invite = FamilyInvite(family_group_id=group.id, invited_email=email, invited_by_user_id=user.id, role="member", token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), status="pending", expires_at=now_utc() + timedelta(days=7))
     db.add(invite); db.commit(); db.refresh(invite)
-    return {"id": invite.id, "email": email, "role": data.role, "status": invite.status, "expires_at": invite.expires_at, "token": raw_token, "invite_path": f"/?family_invite={raw_token}", "message": "Invitation created. Share this demo link with the invited person."}
+    return {"id": invite.id, "email": email, "role": "member", "status": invite.status, "expires_at": invite.expires_at, "token": raw_token, "invite_path": f"/?family_invite={raw_token}", "message": "Invitation created. Share this demo link with the invited person."}
 
 @router.post("/invites/accept")
 def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
@@ -143,7 +147,7 @@ def accept_family_invite(data: FamilyInviteAcceptRequest, db: Session = Depends(
     active_count = db.query(FamilyMember).filter(FamilyMember.family_group_id == invite.family_group_id, FamilyMember.status == "active").count()
     if active_count >= MAX_FAMILY_PEOPLE:
         raise HTTPException(409, "This family household is already full.")
-    db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role=invite.role, status="active"))
+    db.add(FamilyMember(family_group_id=invite.family_group_id, user_id=user.id, role="member", status="active"))
     invite.status = "accepted"; db.commit()
     return {"ok": True, "message": "You joined the CineSense family household.", "group_id": invite.family_group_id}
 
@@ -174,6 +178,7 @@ def owned_profile(db: Session, user_id: int, profile_id: int) -> Profile:
 
 
 def rich_profile_payload(db: Session, user, profile: Profile, active_id: int | None = None) -> dict:
+    photo = db.get(ProfilePhoto, profile.id)
     prefs = preference_payload(db, user.id, profile.id)
     history_count = db.query(ProfileWatchEvent).filter(
         ProfileWatchEvent.user_id == user.id,
@@ -185,6 +190,7 @@ def rich_profile_payload(db: Session, user, profile: Profile, active_id: int | N
         "family_id": user.id,
         "name": decrypt_text(profile.name_enc),
         "display_name": decrypt_text(profile.name_enc),
+        "photo_url": f"/api/family/profiles/{profile.id}/photo?v={photo.version}" if photo else None,
         "active": profile.id == active_id,
         "preferences": prefs,
         "history_count": history_count,
@@ -278,8 +284,70 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db), user=Depends(
     db.query(ProfileWatchEvent).filter(ProfileWatchEvent.profile_id == profile_id, ProfileWatchEvent.user_id == user.id).delete(synchronize_session=False)
     db.query(ProfilePreference).filter(ProfilePreference.profile_id == profile_id, ProfilePreference.user_id == user.id).delete(synchronize_session=False)
     db.query(PlannerActivity).filter(PlannerActivity.profile_id == profile_id, PlannerActivity.user_id == user.id).update({PlannerActivity.profile_id: None}, synchronize_session=False)
+    db.query(ProfilePhoto).filter(ProfilePhoto.profile_id == profile_id).delete(synchronize_session=False)
     db.delete(profile); db.commit()
     return {"ok": True, "active_profile_id": active_profile_id(db, user)}
+
+
+@router.put("/profiles/{profile_id}/photo", summary="Add or replace a profile photo")
+async def upload_profile_photo(profile_id: int, request: Request, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    require_family(user, db)
+    profile = owned_profile(db, user.id, profile_id)
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(400, "Choose a JPG, PNG or WebP photo.")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 5 * 1024 * 1024:
+            raise HTTPException(413, "Profile photos must be 5 MB or smaller.")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(raw)) as source:
+                if source.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("Unsupported image format")
+                if source.width * source.height > 16_000_000:
+                    raise ValueError("Image is too large")
+                source.load()
+                avatar = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGBA"), (256, 256), method=Image.Resampling.LANCZOS)
+                background = Image.new("RGB", avatar.size, "white")
+                background.paste(avatar, mask=avatar.getchannel("A"))
+                output = BytesIO()
+                # Re-encode pixels without embedded metadata.
+                background.save(output, "JPEG", quality=88)
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombWarning, Image.DecompressionBombError):
+        raise HTTPException(400, "Choose a valid photo up to 16 megapixels.")
+    photo = db.get(ProfilePhoto, profile.id)
+    if not photo:
+        photo = ProfilePhoto(profile_id=profile.id, content=output.getvalue(), version=uuid.uuid4().hex)
+        db.add(photo)
+    else:
+        photo.content = output.getvalue()
+        photo.version = uuid.uuid4().hex
+    db.commit()
+    return rich_profile_payload(db, user, profile, active_profile_id(db, user))
+
+
+@router.get("/profiles/{profile_id}/photo", summary="View a photo owned by your Family account")
+def get_profile_photo(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    require_family(user, db)
+    owned_profile(db, user.id, profile_id)
+    photo = db.get(ProfilePhoto, profile_id)
+    if not photo:
+        raise HTTPException(404, "This profile has no photo.")
+    return Response(photo.content, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
+
+
+@router.delete("/profiles/{profile_id}/photo", summary="Remove a profile photo")
+def remove_profile_photo(profile_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    require_family(user, db)
+    profile = owned_profile(db, user.id, profile_id)
+    photo = db.get(ProfilePhoto, profile_id)
+    if photo:
+        db.delete(photo)
+        db.commit()
+    return rich_profile_payload(db, user, profile, active_profile_id(db, user))
 
 
 @router.post("/profiles/switch")

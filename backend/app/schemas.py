@@ -141,13 +141,13 @@ class GroupVoteRequest(BaseModel):
 
 class FamilyInviteCreateRequest(BaseModel):
     email: EmailStr
-    role: str = Field(default="member", pattern="^(member|child)$")
+    role: str = Field(default="member", pattern="^member$")
 
 class FamilyInviteAcceptRequest(BaseModel):
     token: str = Field(min_length=20, max_length=300)
 
 class FamilyMemberRoleRequest(BaseModel):
-    role: str = Field(pattern="^(member|child)$")
+    role: str = Field(pattern="^member$")
 
 class CheckoutRequest(BaseModel):
     plan: str = Field(pattern="^(premium|family)$")

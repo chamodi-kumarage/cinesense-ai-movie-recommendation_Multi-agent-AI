@@ -74,7 +74,20 @@ if /i "%~1"=="--check" (
 )
 
 if not exist backend\.env copy backend\.env.example backend\.env >nul
+
+set "NEED_VENV=0"
 if not exist backend\.venv\Scripts\python.exe (
+  set "NEED_VENV=1"
+) else (
+  backend\.venv\Scripts\python.exe -c "import sys" >nul 2>nul
+  if errorlevel 1 set "NEED_VENV=1"
+)
+
+if "%NEED_VENV%"=="1" (
+  if exist backend\.venv (
+    echo Removing broken or incompatible virtual environment...
+    rmdir /s /q backend\.venv
+  )
   echo Creating backend virtual environment...
   "%PYTHON_EXE%" %PYTHON_ARGS% -m venv backend\.venv
   if errorlevel 1 (

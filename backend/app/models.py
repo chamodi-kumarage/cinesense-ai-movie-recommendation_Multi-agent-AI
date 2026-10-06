@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, Text, UniqueConstraint, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -133,6 +133,12 @@ class Profile(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name_enc: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class ProfilePhoto(Base):
+    __tablename__ = "profile_photos"
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id"), primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    version: Mapped[str] = mapped_column(String(32))
 
 class ActiveProfile(Base):
     __tablename__ = "active_profiles"
