@@ -31,43 +31,6 @@ CineSense is an AI-powered movie discovery and recommendation system. Users can 
 - **Security checks:** The Guardian checks chat input and selected generated output for known risks.
 - **Responsible-AI information:** Review the responsible-AI information provided in the application.
 
-## 🖼️ Application Screenshots
-
-<p align="center">
-  <img src="docs/images/home.png" alt="CineSense home page" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/movie%20catalogue.png" alt="Movie catalogue" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/ai%20assistent.png" alt="CineSense AI assistant" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/mood%20and%20timer%201.png" alt="Mood and available time" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/similar%20movie.png" alt="Similar movie recommendations" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/compaire%201.png" alt="Movie comparison" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/family%201.png" alt="Family movie plans" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/family%20compaire.png" alt="Family movie comparison" width="760">
-</p>
-
-<p align="center">
-  <img src="docs/images/pricing%20plans.png" alt="CineSense pricing plans" width="760">
-</p>
 
 ## 🔐 Security and Responsible AI
 
@@ -89,11 +52,11 @@ CineSense was developed as an academic project for **Information Retrieval and W
 
 ## 👥 Contributors
 
-Add your group members’ names here.
+- [Sasheen](https://github.com/sasheen-widanagamage)
+- [Theekshana](https://github.com/TheekshanaMayadunna)
+- [Sanuja](https://github.com/sanujaandrahennadi)
+- [Chamodi](https://github.com/chamodi-kumarage)
 
-## 📄 License
-
-Add the repository’s license information here, if applicable.
 
 ## 🧠 How CineSense Works
 
