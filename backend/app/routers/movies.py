@@ -1,7 +1,7 @@
 from fastapi import APIRouter,Depends,HTTPException,Query
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from ..db import get_db
 from ..models import Movie,RecommendationFeedback,ProfileWatchEvent,MovieMedia,MovieProducer
 from ..schemas import WatchEventRequest,FeedbackRequest,SummarizeRequest
@@ -83,6 +83,82 @@ def _safe_search_query(value:str)->str:
     value=re.sub(r"\s+"," ",value).strip()[:120]
     return value
 
+def _genre_filter(query,genre:str):
+    """Match a pipe-delimited genre exactly instead of matching substrings."""
+    value=_safe_search_query(genre).casefold()
+    column=func.lower(Movie.genres)
+    return query.filter(or_(
+        column==value,
+        column.startswith(f"{value}|",autoescape=True),
+        column.endswith(f"|{value}",autoescape=True),
+        column.contains(f"|{value}|",autoescape=True),
+    ))
+
+def _search_rank(movie:Movie,value:str):
+    """Put useful title/credit matches ahead of incidental overview matches."""
+    needle=" ".join((value or "").casefold().split())
+    terms=re.findall(r"[\w']+",needle,flags=re.UNICODE)
+    title=" ".join((movie.title or "").casefold().split())
+    title_without_article=re.sub(r"^(?:the|a|an)\s+","",title)
+    title_terms=re.findall(r"[\w']+",title,flags=re.UNICODE)
+    director=(movie.director or "").casefold()
+    cast=(movie.cast or "").casefold()
+    genres=[x.strip().casefold() for x in (movie.genres or "").split("|") if x.strip()]
+    moods=[x.strip().casefold() for x in (movie.moods or "").split("|") if x.strip()]
+    keywords=[x.strip().casefold() for x in (movie.keywords or "").split("|") if x.strip()]
+    overview=(movie.overview or "").casefold()
+    studio=(movie.studio or "").casefold()
+    language=(movie.language or "").casefold()
+    score=0
+
+    if needle:
+        if title==needle:score+=12000
+        elif title_without_article==needle:score+=11000
+        elif title.startswith(needle):score+=8500
+        elif title_without_article.startswith(needle):score+=8200
+        elif re.search(rf"\b{re.escape(needle)}\b",title):score+=7000
+        elif needle in title:score+=5500
+
+        if director==needle:score+=5000
+        elif director.startswith(needle):score+=3500
+        elif needle in director:score+=2400
+        if any(name.strip()==needle for name in cast.split("|")):score+=4200
+        elif needle in cast:score+=1900
+        if needle in genres:score+=3600
+        if needle in moods:score+=3200
+        if needle in keywords:score+=2600
+        if studio==needle:score+=2400
+        elif needle in studio:score+=1200
+        if language==needle:score+=1800
+        if needle.isdigit() and len(needle)==4 and int(needle)==movie.year:score+=4500
+
+    matched_title_terms=0
+    searchable_credits=" ".join([director,cast,studio])
+    searchable_tags=" ".join(genres+moods+keywords)
+    for term in terms:
+        if term in title_terms:
+            score+=650
+            matched_title_terms+=1
+        elif any(word.startswith(term) for word in title_terms):score+=350
+        if term in searchable_credits:score+=180
+        if term in searchable_tags:score+=140
+        if term in overview:score+=20
+    if terms and matched_title_terms==len(terms):score+=1000
+    return (score,float(movie.rating or 0),int(movie.year or 0))
+
+def _local_catalogue_search(db:Session,q:str,genre:str,limit:int):
+    query=db.query(Movie)
+    if q:
+        fields=(Movie.title,Movie.overview,Movie.keywords,Movie.director,Movie.cast,Movie.studio,Movie.genres,Movie.moods,Movie.language)
+        clauses=[field.contains(q,autoescape=True) for field in fields]
+        if q.isdigit() and len(q)==4:clauses.append(Movie.year==int(q))
+        query=query.filter(or_(*clauses))
+    if genre:query=_genre_filter(query,genre)
+    rows=query.all()
+    if q:rows.sort(key=lambda movie:_search_rank(movie,q),reverse=True)
+    else:rows.sort(key=lambda movie:(float(movie.rating or 0),int(movie.year or 0)),reverse=True)
+    return rows[:limit]
+
 def _moods_for_genres(genres):
     names={g.get("name","") for g in genres}; moods=[]
     if names & {"Comedy","Animation","Family"}:moods.append("Happy")
@@ -112,11 +188,16 @@ async def _import_tmdb_movie(db:Session,client,http_id:int):
     return movie
 
 @router.get("/catalogue/search")
-async def search_movies(q:str=Query(...,min_length=2,max_length=120),limit:int=Query(24,ge=1,le=50),db:Session=Depends(get_db)):
-    q=_safe_search_query(q);p=f"%{q}%"
-    local=db.query(Movie).filter(or_(Movie.title.ilike(p),Movie.overview.ilike(p),Movie.keywords.ilike(p),Movie.director.ilike(p))).order_by(Movie.rating.desc()).limit(limit).all()
-    if len(local)>=min(8,limit) or not settings.tmdb_api_key:
-        return {"results":[movie_dict(m) for m in local],"external_search":False,"tmdb_configured":bool(settings.tmdb_api_key)}
+async def search_movies(q:str|None=Query(None,max_length=120),genre:str|None=Query(None,max_length=50),limit:int=Query(24,ge=1,le=50),db:Session=Depends(get_db)):
+    q=_safe_search_query(q or "");genre=_safe_search_query(genre or "")
+    if q and len(q)<2:raise HTTPException(422,"Type at least 2 characters to search.")
+    if not q and not genre:raise HTTPException(422,"Enter a search term or choose a genre.")
+    local=_local_catalogue_search(db,q,genre,limit)
+    strong_local=bool(q and local and _search_rank(local[0],q)[0]>=1000)
+    if strong_local or len(local)>=min(8,limit) or not settings.tmdb_api_key:
+        return {"results":[movie_dict(m) for m in local],"total":len(local),"external_search":False,"tmdb_configured":bool(settings.tmdb_api_key)}
+    if not q:
+        return {"results":[movie_dict(m) for m in local],"total":len(local),"external_search":False,"tmdb_configured":bool(settings.tmdb_api_key)}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r=await client.get("https://api.themoviedb.org/3/search/movie",params={"api_key":settings.tmdb_api_key,"query":q,"include_adult":"false","language":"en-US","page":1})
@@ -125,8 +206,8 @@ async def search_movies(q:str=Query(...,min_length=2,max_length=120),limit:int=Q
                     tid=item.get("id")
                     if tid: await _import_tmdb_movie(db,client,int(tid))
                 db.commit()
-                local=db.query(Movie).filter(or_(Movie.title.ilike(p),Movie.overview.ilike(p),Movie.keywords.ilike(p),Movie.director.ilike(p))).order_by(Movie.rating.desc()).limit(limit).all()
-                return {"results":[movie_dict(m) for m in local],"external_search":True,"tmdb_configured":True}
+                local=_local_catalogue_search(db,q,genre,limit)
+                return {"results":[movie_dict(m) for m in local],"total":len(local),"external_search":True,"tmdb_configured":True}
     except Exception:
         db.rollback()
-    return {"results":[movie_dict(m) for m in local],"external_search":False,"tmdb_configured":bool(settings.tmdb_api_key)}
+    return {"results":[movie_dict(m) for m in local],"total":len(local),"external_search":False,"tmdb_configured":bool(settings.tmdb_api_key)}

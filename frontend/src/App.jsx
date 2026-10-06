@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import UserCalendar, { localDateKey } from './UserCalendar'
 
 const MOODS = ['Happy', 'Relaxed', 'Sad/Cathartic', 'Thrilled', 'Romantic', 'Nostalgic']
 const GENRES = ['Comedy','Drama','Thriller','Romance','Science Fiction','Animation','Adventure','Mystery']
+const COMPARISON_COLORS = ['#ef4055', '#8b5cf6', '#22c55e', '#f59e0b']
 
 const cleanAssistantText = value => String(value || '')
   .replace(/```[\s\S]*?```/g, block => block.replace(/```[a-z]*\n?/gi, '').replace(/```/g, ''))
@@ -427,44 +428,61 @@ function MovieSearch({ movies, onOpenMovie, onCatalogueExpand }) {
   const [results,setResults]=useState([])
   const [busy,setBusy]=useState(false)
   const [external,setExternal]=useState(false)
+  const [error,setError]=useState('')
   const normalized=query.trim()
+  const moviesRef=useRef(movies)
+  const requestSequence=useRef(0)
+  moviesRef.current=movies
   const genres=useMemo(()=>Array.from(new Set(movies.flatMap(movie=>movie.genres||[]))).sort((a,b)=>a.localeCompare(b)),[movies])
 
   useEffect(()=>{
     const applyGenre=rows=>genre?rows.filter(movie=>(movie.genres||[]).some(g=>g.toLowerCase()===genre.toLowerCase())):rows
+    const sequence=++requestSequence.current
+    setError('')
+    setExternal(false)
 
-    if(normalized.length<2){
-      setExternal(false)
-      setResults(genre?applyGenre(movies).slice(0,24):[])
+    if(normalized.length===1){
+      setBusy(false)
+      setResults([])
+      return
+    }
+    if(!normalized&&!genre){
+      setBusy(false)
+      setResults([])
       return
     }
 
+    const controller=new AbortController()
     const timer=setTimeout(async()=>{
       setBusy(true)
       try{
-        const payload=await api.searchMovies(normalized)
+        const payload=await api.searchMovies(normalized,{genre,signal:controller.signal})
+        if(sequence!==requestSequence.current)return
         const rows=payload.results||[]
         const filtered=applyGenre(rows)
         setResults(filtered)
         setExternal(Boolean(payload.external_search))
-        onCatalogueExpand?.(rows)
-      }catch{
+        if(payload.external_search)onCatalogueExpand?.(rows)
+      }catch(e){
+        if(e.name==='AbortError'||sequence!==requestSequence.current)return
         const n=normalized.toLowerCase()
-        const local=movies.filter(movie=>[movie.title,movie.year,movie.language,movie.director,movie.studio,...(movie.genres||[]),...(movie.moods||[])].filter(Boolean).join(' ').toLowerCase().includes(n))
+        const local=moviesRef.current.filter(movie=>(!n||[movie.title,movie.year,movie.language,movie.director,movie.studio,...(movie.cast||[]),...(movie.genres||[]),...(movie.moods||[]),...(movie.keywords||[])].filter(Boolean).join(' ').toLowerCase().includes(n)))
         setResults(applyGenre(local).slice(0,24))
-      }finally{setBusy(false)}
-    },350)
-    return ()=>clearTimeout(timer)
-  },[normalized,genre,movies])
+        setError(`Live catalogue search is unavailable. Showing matches already loaded on this page. ${e.message}`)
+      }finally{if(sequence===requestSequence.current)setBusy(false)}
+    },300)
+    return ()=>{clearTimeout(timer);controller.abort()}
+  },[normalized,genre,onCatalogueExpand])
 
-  const searching=Boolean(normalized||genre)
-  return <section className="movie-search-section" aria-label="Movie search">
+  const searching=Boolean(normalized.length>=2||genre)
+  const hasInput=Boolean(normalized||genre)
+  return <section className="movie-search-section" aria-label="Movie search" role="search">
     <div className="movie-search-row">
-      <div className="search-shell cinematic-search">
+      <div className="search-shell cinematic-search" aria-busy={busy}>
         <span className="search-icon">⌕</span>
-        <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search almost any movie title, mood or director…" aria-label="Search movies" />
+        <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==='Escape')setQuery('')}} placeholder="Search by title, actor, director, mood or keyword…" role="combobox" aria-autocomplete="list" aria-label="Search movies" aria-controls="movie-search-results" aria-expanded={hasInput} autoComplete="off" />
         {busy&&<span className="searching-dot">Searching…</span>}
-        {query&&<button className="search-clear" onClick={()=>setQuery('')} aria-label="Clear search">×</button>}
+        {query&&<button type="button" className="search-clear" onClick={()=>setQuery('')} aria-label="Clear search">×</button>}
       </div>
       <label className="genre-filter-shell">
         <span>Genre</span>
@@ -474,10 +492,13 @@ function MovieSearch({ movies, onOpenMovie, onCatalogueExpand }) {
         </select>
       </label>
     </div>
-    {searching&&<div className="search-results-panel">
-      <div className="search-results-head"><strong>{busy?'Searching movie catalogue…':results.length?`${results.length} matches`:'No matches found'}</strong><span>{genre?`${genre} filter · `:''}{external?'Expanded from TMDB and saved to CineSense':'CineSense catalogue'}</span></div>
-      {results.length>0&&<div className="search-results-grid">{results.map(movie=><button className="search-result" key={movie.id} onClick={()=>onOpenMovie(movie)}><div className="search-poster"><Poster movie={movie} compact /></div><div><strong>{movie.title}</strong><span>{movie.year} · {movie.runtime} min · ★ {movie.rating}</span><small>{movie.genres?.slice(0,3).join(' · ')} · {movie.source==='tmdb'?'TMDB':'Curated'}</small></div></button>)}</div>}
-      {!busy&&results.length===0&&<p className="muted">Try another title or genre. For broader global movie search, configure TMDB_API_KEY in the backend .env file.</p>}
+    {hasInput&&<div className="search-results-panel" id="movie-search-results" aria-live="polite">
+      {normalized.length===1?<p className="search-hint">Type one more character to search the catalogue.</p>:<>
+      <div className="search-results-head"><strong>{busy?'Searching movie catalogue…':results.length?`${results.length} ${results.length===1?'match':'matches'}`:'No matches found'}</strong><span>{genre?`${genre} filter · `:''}{external?'Expanded from TMDB and saved to CineSense':'CineSense catalogue'}</span></div>
+      {error&&<div className="search-error" role="status">{error}</div>}
+      {results.length>0&&<div className="search-results-grid" role="listbox">{results.map(movie=><button type="button" className="search-result" role="option" aria-selected="false" key={movie.id} onClick={()=>onOpenMovie(movie)}><div className="search-poster"><Poster movie={movie} compact /></div><div><strong>{movie.title}</strong><span>{movie.year} · {movie.runtime} min · ★ {movie.rating}</span><small>{movie.genres?.slice(0,3).join(' · ')} · {movie.source==='tmdb'?'TMDB':'Curated'}</small></div></button>)}</div>}
+      {!busy&&!error&&searching&&results.length===0&&<p className="muted">No catalogue matches. Try a full title, an actor or director, a mood, or a different genre.</p>}
+      </>}
     </div>}
   </section>
 }
@@ -1054,13 +1075,14 @@ function CompareModal({ open, onClose, movies, compareIds, toggleCompare, user, 
   const [scenario, setScenario] = useState('')
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
-  const [tournament, setTournament] = useState(null)
-  const [reason, setReason] = useState('Better mood fit')
-  const [signalMessage, setSignalMessage] = useState('')
   const selected = movies.filter(m => compareIds.includes(m.id))
+  const movieColor = id => {
+    const selectedIndex = compareIds.findIndex(movieId => String(movieId) === String(id))
+    return COMPARISON_COLORS[(selectedIndex < 0 ? 0 : selectedIndex) % COMPARISON_COLORS.length]
+  }
 
   useEffect(() => {
-    if (!open) { setResult(null); setTournament(null); setScenario(''); setSignalMessage('') }
+    if (!open) { setResult(null); setScenario('') }
   }, [open])
 
   const run = async (scenarioOverride = scenario) => {
@@ -1068,32 +1090,15 @@ function CompareModal({ open, onClose, movies, compareIds, toggleCompare, user, 
     if (selected.length < 2) return
     setBusy(true)
     try {
-      setResult(await api.compare({
+      const response=await api.compare({
         movie_ids: selected.map(m => m.id), mood, mode,
         free_minutes: Number(freeMinutes) || null,
         scenario: scenarioOverride?.trim() || null,
         user_note: null
-      }))
+      })
+      setResult(response)
     } catch (e) { setResult({ error:e.message }) }
     finally { setBusy(false) }
-  }
-
-  const startTournament = () => {
-    if (selected.length < 2) return
-    setTournament({ remaining:selected.map(m=>m.id), log:[], winner:null })
-    setSignalMessage('Choose between each pair. The winner advances until one movie remains.')
-  }
-  const currentPair = tournament?.remaining?.slice(0,2).map(id=>selected.find(m=>m.id===id)).filter(Boolean) || []
-  const chooseTournament = async winner => {
-    if (!tournament || currentPair.length < 2) return
-    const loser = currentPair.find(m=>m.id!==winner.id)
-    const nextRemaining = [winner.id, ...tournament.remaining.slice(2)]
-    const nextLog = [...tournament.log,{winner:winner.title,loser:loser.title,reason}]
-    try { await api.tournamentSignal({winner_movie_id:winner.id,loser_movie_id:loser.id,reason}) } catch {}
-    if (nextRemaining.length === 1) {
-      setTournament({remaining:nextRemaining,log:nextLog,winner})
-      setSignalMessage(`${winner.title} wins the tournament. Your selection reasons were saved as lightweight preference signals.`)
-    } else setTournament({remaining:nextRemaining,log:nextLog,winner:null})
   }
 
   const Radar = ({rows}) => {
@@ -1103,62 +1108,59 @@ function CompareModal({ open, onClose, movies, compareIds, toggleCompare, user, 
     return <div className="radar-wrap"><svg viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Multi-criteria radar comparison">
       {[25,50,75,100].map(level=><polygon key={level} className="radar-grid" points={criteria.map((_,i)=>point(i,level).join(',')).join(' ')}/>) }
       {criteria.map(([,label],i)=>{const [x,y]=point(i,116);return <text key={label} x={x} y={y} textAnchor="middle" dominantBaseline="middle">{label}</text>})}
-      {rows.slice(0,4).map((row,idx)=><polygon key={row.id} className={`radar-shape radar-${idx+1}`} points={criteria.map(([key],i)=>point(i,row[key]).join(',')).join(' ')}/>) }
-    </svg><div className="radar-legend">{rows.slice(0,4).map((r,i)=><span key={r.id}><i className={`radar-dot radar-${i+1}`}/>{r.title}</span>)}</div></div>
+      {rows.slice(0,4).map(row=><polygon key={row.id} className="radar-shape" style={{fill:movieColor(row.id),stroke:movieColor(row.id)}} points={criteria.map(([key],i)=>point(i,row[key]).join(',')).join(' ')}/>) }
+    </svg><div className="radar-legend" aria-label="Radar chart movie colours">{rows.slice(0,4).map(r=><span key={r.id}><i className="radar-dot" style={{backgroundColor:movieColor(r.id)}} aria-hidden="true"/><strong>{r.title}</strong></span>)}</div></div>
   }
 
-  const Scatter = ({rows}) => {
-    const W=500,H=260,p=38; const x=v=>p+(Math.max(0,Math.min(10,v))/10)*(W-p*2); const y=v=>H-p-(v/100)*(H-p*2)
-    return <svg className="scatter" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Rating versus mood-fit scatter plot">
-      <line x1={p} y1={H-p} x2={W-p} y2={H-p}/><line x1={p} y1={p} x2={p} y2={H-p}/>
-      <text x={W/2} y={H-5} textAnchor="middle">Catalogue rating →</text><text x="14" y={H/2} transform={`rotate(-90 14 ${H/2})`} textAnchor="middle">Mood fit →</text>
-      {rows.map((r,i)=><g key={r.id}><circle className={`scatter-point scatter-${i+1}`} cx={x(r.rating)} cy={y(r.mood_fit)} r={Math.max(8,Math.min(20,r.runtime/9))}/><text x={x(r.rating)+10} y={y(r.mood_fit)-10}>{r.title}</text></g>)}
-    </svg>
-  }
+  const RatingMoodComparison = ({rows}) => <div className="rating-mood-list">
+    {rows.map(row=><article key={row.id} style={{'--series-color':movieColor(row.id)}}>
+      <header><i aria-hidden="true"/><strong>{row.title}</strong></header>
+      <div className="rating-mood-metric"><div><span>Catalogue rating</span><b>{row.rating}/10</b></div><div className="rating-mood-track"><i style={{width:`${Math.max(0,Math.min(100,Number(row.rating)*10))}%`,backgroundColor:movieColor(row.id)}}/></div></div>
+      <div className="rating-mood-metric"><div><span>Mood match · {mood}</span><b>{row.mood_fit}%</b></div><div className="rating-mood-track"><i style={{width:`${Math.max(0,Math.min(100,row.mood_fit))}%`,backgroundColor:movieColor(row.id)}}/></div></div>
+    </article>)}
+  </div>
 
   return (
-    <Modal open={open} onClose={onClose} title="Compare your shortlist" eyebrow="AGENT 4 · ADAPTIVE DECISION & EXPLAINABILITY" wide>
+    <Modal open={open} onClose={onClose} title="Compare your shortlist"  wide>
       <div className="compare-control-grid">
         <label>Decision mode<select value={mode} onChange={e=>setMode(e.target.value)}>{MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
         <label>Current mood<select value={mood} onChange={e=>setMood(e.target.value)}>{MOODS.map(m=><option key={m}>{m}</option>)}</select></label>
         <label>Available time<input type="number" min="30" max="600" value={freeMinutes} onChange={e=>setFreeMinutes(e.target.value)} /><span className="input-suffix">min</span></label>
       </div>
-      <p className="compare-intro">Choose 2–4 films. CineSense reuses the existing Orchestrator, Mood & Preference, Retrieval, Comparison/Explainability, Scheduler and Guardian agents to ground the decision in catalogue facts and your current context.</p>
+      <p className="compare-intro">Select 2–4 films to compare. CineSense evaluates them using catalogue facts and your preferences (mood, time, group safety) and recommends the best fit for your situation.</p>
 
       <div className="selected-strip">
         {selected.length===0?<div className="empty-inline">No movies selected. Use the + button on movie cards.</div>:selected.map(movie=><button key={movie.id} onClick={()=>toggleCompare(movie.id)}><Poster movie={movie} compact/><span>{movie.title}</span><b>×</b></button>)}
       </div>
-      <div className="compare-primary-actions"><button className="btn-primary" disabled={selected.length<2||busy} onClick={()=>run('')}>{busy?'Comparing…':`Compare ${selected.length || ''} movies`}</button><button className="btn-secondary" disabled={selected.length<2} onClick={startTournament}>Start pairwise tournament</button></div>
-
-      <section className="what-if-box">
-        <div><div className="section-kicker">WHAT-IF SIMULATOR</div><h3>Change one condition. Keep the same shortlist.</h3><p>Try “What if I only have 90 minutes?”, “less intense”, “rating matters more than mood”, or “remove horror”.</p></div>
-        <div className="what-if-input"><input value={scenario} onChange={e=>setScenario(e.target.value)} placeholder="What if I only have 90 minutes?" onKeyDown={e=>{if(e.key==='Enter')run()}}/><button disabled={selected.length<2||busy||!scenario.trim()} onClick={()=>run()}>Simulate</button></div>
-      </section>
-
-      {tournament && <section className="tournament-box">
-        <div className="section-kicker">PAIRWISE ELIMINATION TOURNAMENT</div>
-        {tournament.winner ? <div className="tournament-winner"><Poster movie={tournament.winner} compact/><div><h3>🏆 {tournament.winner.title}</h3><p>{signalMessage}</p></div></div> : <>
-          <div className="tournament-pair">{currentPair.map(movie=><button key={movie.id} onClick={()=>chooseTournament(movie)}><Poster movie={movie}/><strong>{movie.title}</strong><small>{movie.runtime} min · ★ {movie.rating}</small><span>Choose this movie</span></button>)}</div>
-          <label className="tournament-reason">Why are you choosing it?<select value={reason} onChange={e=>setReason(e.target.value)}><option>Better story</option><option>Better mood fit</option><option>Shorter runtime</option><option>Preferred genre</option><option>I simply prefer this one</option></select></label>
-        </>}
-        {tournament.log.length>0&&<div className="tournament-log">{tournament.log.map((x,i)=><p key={i}><b>{x.winner}</b> beat {x.loser} · {x.reason}</p>)}</div>}
-      </section>}
+      <div className="compare-primary-actions"><button className="btn-primary" disabled={selected.length<2||busy} onClick={()=>run('')}>{busy?'Comparing…':`Compare ${selected.length || ''} movies`}</button></div>
 
       {result?.error&&<div className="error-box">{result.error}</div>}
       {result?.rows&&<div className="comparison-output comparison-v2">
-        <div className="comparison-summary"><div><div className="section-kicker">{result.mode_label}</div><h3>{result.rows.find(r=>r.id===result.winner_id)?.title} is the current best fit</h3><p>{cleanAssistantText(result.explanation)}</p></div><div className="weight-pills">{Object.entries(result.weights||{}).map(([k,v])=><span key={k}>{k} {v}%</span>)}</div></div>
+        <div className="comparison-summary"><div><div className="section-kicker">{result.mode_label}</div><h3>{result.rows.find(r=>r.id===result.winner_id)?.title} is the best fit</h3><p>{cleanAssistantText(result.explanation)}</p></div></div>
         {result.scenario&&<div className="ranking-change-box"><strong>What changed?</strong>{result.ranking_changes?.length?result.ranking_changes.map((x,i)=><p key={i}>↕ {x}</p>):<p>The new condition did not change the ranking, but the suitability and risk scores were recalculated.</p>}</div>}
 
-        <div className="table-scroll"><table><thead><tr><th>Rank</th><th>Movie</th><th>Suitability</th><th>Mood</th><th>Genre</th><th>Time</th><th>Rating</th><th>Risk</th></tr></thead><tbody>{result.rows.map(row=><tr className={row.id===result.winner_id?'winner-row':''} key={row.id}><td>#{row.rank}{row.rank_change?` (${row.rank_change>0?'↑':'↓'}${Math.abs(row.rank_change)})`:''}</td><td>{row.id===result.winner_id?'✦ ':''}{row.title}</td><td><b>{row.overall_score}%</b></td><td>{row.mood_fit}%</td><td>{row.genre_fit}%</td><td>{row.time_fit}%</td><td>{row.rating}</td><td><span className={`risk-badge risk-${row.risk_level.toLowerCase()}`}>{row.risk_level}</span></td></tr>)}</tbody></table></div>
+        <div className="comparison-quick-list">{result.rows.map(row=>{const minutes=Number(result.free_minutes||freeMinutes);const difference=minutes-row.runtime;return <article className={row.id===result.winner_id?'quick-winner':''} style={{'--series-color':movieColor(row.id)}} key={row.id}>
+          <span className="quick-rank">#{row.rank}</span><Poster movie={row} compact/><div className="quick-copy"><div className="quick-title"><h4>{row.title}</h4><strong>{row.overall_score}% fit</strong></div><p>{row.runtime} min · ★ {row.rating} · {row.tone}</p><div className="quick-metrics"><span>Mood {row.mood_fit}%</span><span>Genre {row.genre_fit}%</span><span>{difference>=0?`Fits with ${difference} min spare`:`${Math.abs(difference)} min over your time`}</span></div><small>{row.risk_reasons?.[0]}</small></div><span className={`risk-badge risk-${row.risk_level.toLowerCase()}`}>{row.risk_level} risk</span>
+        </article>})}</div>
+
+        <section className="what-if-box">
+          <div><div className="section-kicker">TRY ANOTHER SITUATION</div><h3>Change one condition. Keep the same movies.</h3><p>For example: “What if I only have 90 minutes?”, “less intense”, “rating matters more than mood”, or “remove horror”.</p></div>
+          <div className="what-if-input"><input value={scenario} onChange={e=>setScenario(e.target.value)} placeholder="What if I only have 90 minutes?" aria-label="Describe a different comparison situation" onKeyDown={e=>{if(e.key==='Enter')run()}}/><button disabled={selected.length<2||busy||!scenario.trim()} onClick={()=>run()}>Update result</button></div>
+        </section>
+
+        <div className="comparison-details">
+        <div className="comparison-weight-explainer"><strong>How CineSense weighted this decision</strong><div className="weight-pills">{Object.entries(result.weights||{}).map(([k,v])=><span key={k}>{k} {v}%</span>)}</div></div>
+        <div className="table-scroll"><table><thead><tr><th>Rank</th><th>Movie</th><th>Suitability</th><th>Mood</th><th>Genre</th><th>Time</th><th>Rating</th><th>Risk</th></tr></thead><tbody>{result.rows.map(row=><tr className={row.id===result.winner_id?'winner-row':''} style={{'--series-color':movieColor(row.id)}} key={row.id}><td>#{row.rank}{row.rank_change?` (${row.rank_change>0?'↑':'↓'}${Math.abs(row.rank_change)})`:''}</td><td>{row.id===result.winner_id?'✦ ':''}{row.title}</td><td><b>{row.overall_score}%</b></td><td>{row.mood_fit}%</td><td>{row.genre_fit}%</td><td>{row.time_fit}%</td><td>{row.rating}</td><td><span className={`risk-badge risk-${row.risk_level.toLowerCase()}`}>{row.risk_level}</span></td></tr>)}</tbody></table></div>
 
         <div className="comparison-chart-grid">
-          <section className="chart-card"><h3>Overall suitability</h3><p>Weighted by the selected AI decision mode.</p><div className="suitability-bars">{result.rows.map(r=><div key={r.id}><span>{r.title}</span><div><i style={{width:`${r.overall_score}%`}}/></div><b>{r.overall_score}%</b></div>)}</div></section>
-          <section className="chart-card"><h3>Mood compatibility</h3><p>How closely catalogue mood tags match {mood}.</p><div className="mood-bars">{result.rows.map(r=><div key={r.id}><span>{r.title}</span><div><i style={{width:`${r.mood_fit}%`}}/></div><b>{r.mood_fit}%</b></div>)}</div></section>
-          <section className="chart-card"><h3>Runtime comparison</h3><p>Green fits comfortably, orange is tight, red exceeds {result.free_minutes||freeMinutes} minutes.</p><div className="runtime-bars">{result.rows.map(r=>{const left=(result.free_minutes||freeMinutes)-r.runtime;const cls=left<0?'exceed':left<=10?'tight':'fit';return <div key={r.id}><span>{r.title}</span><div className={cls}><i style={{width:`${Math.min(100,(r.runtime/Math.max(Number(result.free_minutes||freeMinutes),r.runtime))*100)}%`}}/></div><b>{left>=0?`${left}m left`:`${Math.abs(left)}m over`}</b></div>})}</div></section>
-          <section className="chart-card"><h3>Decision risk / regret</h3><p>Potential disadvantages before you commit.</p><div className="risk-list">{result.rows.map(r=><article key={r.id}><div><strong>{r.title}</strong><span className={`risk-badge risk-${r.risk_level.toLowerCase()}`}>{r.risk_level} · {r.risk_score}%</span></div><p>{r.risk_reasons.join(' ')}</p></article>)}</div></section>
+          <section className="chart-card"><h3>Overall suitability</h3><p>Weighted by the selected AI decision mode.</p><div className="suitability-bars">{result.rows.map(r=><div key={r.id}><span>{r.title}</span><div><i style={{width:`${r.overall_score}%`,backgroundColor:movieColor(r.id)}}/></div><b>{r.overall_score}%</b></div>)}</div></section>
+          <section className="chart-card"><h3>Mood compatibility</h3><p>How closely catalogue mood tags match {mood}.</p><div className="mood-bars">{result.rows.map(r=><div key={r.id}><span>{r.title}</span><div><i style={{width:`${r.mood_fit}%`,backgroundColor:movieColor(r.id)}}/></div><b>{r.mood_fit}%</b></div>)}</div></section>
+          <section className="chart-card"><h3>Runtime comparison</h3><p>Bar colours identify each movie; the label shows whether it fits within {result.free_minutes||freeMinutes} minutes.</p><div className="runtime-bars">{result.rows.map(r=>{const left=(result.free_minutes||freeMinutes)-r.runtime;return <div key={r.id}><span>{r.title}</span><div><i style={{width:`${Math.min(100,(r.runtime/Math.max(Number(result.free_minutes||freeMinutes),r.runtime))*100)}%`,backgroundColor:movieColor(r.id)}}/></div><b>{left>=0?`${left}m left`:`${Math.abs(left)}m over`}</b></div>})}</div></section>
+          <section className="chart-card"><h3>Disadvantages</h3><p>Potential disadvantages before you commit.</p><div className="risk-list">{result.rows.map(r=><article key={r.id} style={{'--series-color':movieColor(r.id)}}><div><strong>{r.title}</strong><span className={`risk-badge risk-${r.risk_level.toLowerCase()}`}>{r.risk_level} · {r.risk_score}%</span></div><p>{r.risk_reasons.join(' ')}</p></article>)}</div></section>
         </div>
 
-        <div className="comparison-chart-grid chart-wide"><section className="chart-card"><h3>Multi-criteria radar</h3><p>Six grounded factors, limited to four shortlisted movies for readability.</p><Radar rows={result.rows}/></section><section className="chart-card"><h3>Rating vs mood fit</h3><p>Upper-right options combine stronger catalogue ratings with stronger mood compatibility. Bubble size represents runtime.</p><Scatter rows={result.rows}/></section></div>
+        <div className="comparison-chart-grid chart-wide"><section className="chart-card"><h3>Multi-criteria radar</h3><p>Six grounded factors, limited to four shortlisted movies for readability.</p><Radar rows={result.rows}/></section></div>
+        </div>
       </div>}
     </Modal>
   )
@@ -1517,6 +1519,14 @@ export default function App() {
     })
   }
 
+  const mergeCatalogue = useCallback(rows => {
+    setMovies(current => {
+      const known=new Set(current.map(movie=>movie.id))
+      const additions=(rows||[]).filter(movie=>!known.has(movie.id))
+      return additions.length?[...current,...additions]:current
+    })
+  },[])
+
   const groups = useMemo(() => {
     const byMood = mood => movies.filter(movie => movie.moods?.includes(mood))
     return [
@@ -1639,7 +1649,7 @@ export default function App() {
           </button>
         </section>
 
-        <MovieSearch movies={movies} onOpenMovie={setSelectedMovie} onCatalogueExpand={rows=>setMovies(current=>{const map=new Map(current.map(m=>[m.id,m]));rows.forEach(m=>map.set(m.id,m));return [...map.values()]})} />
+        <MovieSearch movies={movies} onOpenMovie={setSelectedMovie} onCatalogueExpand={mergeCatalogue} />
 
         {groups.map(([title, subtitle, list]) =>
           list.length > 0 ? (

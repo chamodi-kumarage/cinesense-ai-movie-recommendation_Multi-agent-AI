@@ -1,0 +1,92 @@
+[
+  {
+    "id": "T-01",
+    "outcome": "PASS",
+    "observation": "Beta chat status=200; Alpha canary absent from response and Beta-owned stored turns=True.",
+    "evidence": "E-RUN-T01"
+  },
+  {
+    "id": "T-02",
+    "outcome": "FAIL",
+    "observation": "ChatTurn columns include profile_id=False; account-wide turns=4; profile-switch response status=200.",
+    "evidence": "E-RUN-T02"
+  },
+  {
+    "id": "T-03",
+    "outcome": "PASS",
+    "observation": "Watch write=200; other own profile history count=0; foreign profile response=404.",
+    "evidence": "E-RUN-T03"
+  },
+  {
+    "id": "T-04",
+    "outcome": "FAIL",
+    "observation": "Profile preference reads statuses=200/200; ConversationState has profile_id=False; shared row exists=True.",
+    "evidence": "E-RUN-T04"
+  },
+  {
+    "id": "T-05",
+    "outcome": "PASS",
+    "observation": "Foreign profile ID response=404; own plans response=200, count=0.",
+    "evidence": "E-RUN-T05"
+  },
+  {
+    "id": "T-06",
+    "outcome": "PASS",
+    "observation": "No-cookie=401; malformed-cookie=401; responses contain data=False.",
+    "evidence": "E-RUN-T06"
+  },
+  {
+    "id": "T-07",
+    "outcome": "PASS",
+    "observation": "Observed cookie flags={'httponly': True, 'samesite=lax': True, 'secure': False}; logout emitted access-token deletion=True. Browser storage and production Secure flag not tested.",
+    "evidence": "E-RUN-T07"
+  },
+  {
+    "id": "T-08",
+    "outcome": "PASS",
+    "observation": "Offline chat response status=200; tested configured synthetic phrase indicators only. Provider-backed behavior not tested.",
+    "evidence": "E-RUN-T08"
+  },
+  {
+    "id": "T-09",
+    "outcome": "FAIL",
+    "observation": "Probe response=200; chat rows remain account-scoped (profile column absent=True); canary disclosure not asserted.",
+    "evidence": "E-RUN-T09"
+  },
+  {
+    "id": "T-10",
+    "outcome": "FAIL",
+    "observation": "Canary found verbatim in persisted agent trace payload=True; chat status=200.",
+    "evidence": "E-RUN-T10"
+  },
+  {
+    "id": "T-11",
+    "outcome": "PASS",
+    "observation": "Empty-message request status=422; stacktrace/secret markers present=False.",
+    "evidence": "E-RUN-T11"
+  },
+  {
+    "id": "T-12",
+    "outcome": "INCONCLUSIVE",
+    "observation": "App configured offline; llm_service.enabled=False. No external-provider request was made; live-provider payload/retention cannot be assessed.",
+    "evidence": "E-RUN-T12"
+  },
+  {
+    "id": "T-13",
+    "outcome": "FAIL",
+    "observation": "Unconsented chat=403; consent withdrawal request=400; separate withdrawal route found=False.",
+    "evidence": "E-RUN-T13"
+  },
+  {
+    "id": "T-14",
+    "outcome": "FAIL",
+    "observation": "Account delete/export routes=[]; chat turns still present after logout/login=10.",
+    "evidence": "E-RUN-T14"
+  },
+  {
+    "id": "T-15",
+    "outcome": "INCONCLUSIVE",
+    "observation": "Synthetic billing save=200; full PAN/CVV absent from response and stored fields=True; calendar connect status=503 (no OAuth credentials expected).",
+    "evidence": "E-RUN-T15"
+  }
+]
